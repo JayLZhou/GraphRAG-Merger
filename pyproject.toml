@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "semantic-merge"
+version = "0.0.1"
+description = "Efficient semantic index merging for graph-augmented RAG systems"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "JayLZhou" }]
+keywords = ["graphrag", "rag", "knowledge-graph", "index-merge", "retrieval"]
+
+# Core stays dependency-light on purpose: the data model and algorithms are
+# pure Python. numpy is only needed for embedding similarity.
+dependencies = [
+    "numpy>=1.23",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/JayLZhou/GraphRAG-Merger"
+Repository = "https://github.com/JayLZhou/GraphRAG-Merger"
+
+[tool.setuptools.packages.find]
+include = ["semantic_merge*", "experiments*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
