@@ -1,10 +1,9 @@
 # Codex Tasks
 
-> **Status:** Tasks 1–3 are **implemented and tested** (21 passing tests, working
-> binary + multi-index merge, synthetic benchmark). **Task 4 (GraphRAG parquet
-> adapter) is the active next task.** The prompts for 1–3 are kept below as a
-> record of scope and as regression specs. Filling in the formal proofs in
-> [`theory.md`](theory.md) is separate follow-up work.
+> **Status:** Tasks 1–4 are **implemented and tested** (24 passing tests: working
+> binary + multi-index merge, synthetic benchmark, and GraphRAG parquet adapter).
+> The prompts below are kept as a record of scope and as regression specs. The
+> only remaining work is filling in the formal proofs in [`theory.md`](theory.md).
 
 Staged build plan for the Codex cloud agent. Each task is a self-contained
 GitHub issue: copy the **Prompt** block into the issue body. Do the tasks **in
@@ -152,7 +151,7 @@ offline.
 
 ---
 
-## Task 4 — Add GraphRAG parquet adapter  ⬅ next
+## Task 4 — Add GraphRAG parquet adapter  ✅ done
 
 **Issue title:** `Add GraphRAG parquet adapter`
 
@@ -173,13 +172,16 @@ the adapter only. Document usage in the README.
 
 ---
 
-## Explicitly out of scope for now
+## Still out of scope (future work)
 
-Do **not** attempt these until tasks 1–3 are solid:
+The offline parquet adapter (Task 4) is done, but these remain deliberately out
+of scope for the prototype:
 
-- wiring into a full live GraphRAG system / real large-scale corpora;
-- real LLM calls for summary patching/regeneration;
-- complex production-grade community reclustering;
-- writing the full research paper.
+- wiring into a full **live** GraphRAG system / real large-scale corpora;
+- **real LLM calls** for summary patching/regeneration (currently simulated by
+  cost proxies + deterministic placeholder text);
+- production-grade community reclustering;
+- the formal proofs in [`theory.md`](theory.md);
+- writing the research paper.
 
 Keep each PR scoped to one task.

@@ -12,10 +12,12 @@ This repo is a research prototype: a clean, dependency-light Python package
 module by an agent** following the staged plan in
 [`docs/codex_tasks.md`](docs/codex_tasks.md).
 
-> **Status: MVP implemented (Tasks 1–3).** The full binary-merge pipeline, the
-> multi-index planner, the offline synthetic benchmark, and the test suite are
-> implemented and green (21 tests, zero third-party runtime deps). The GraphRAG
-> parquet adapter (Task 4) is the remaining piece. See [Status](#status).
+> **Status: implemented (Tasks 1–4).** The full binary-merge pipeline, the
+> multi-index planner, the offline synthetic benchmark, the GraphRAG parquet
+> adapter, and the test suite are implemented and green (24 tests; the core
+> package has zero third-party runtime deps — the adapter's pandas/pyarrow are
+> an optional extra, imported lazily). The formal proofs in
+> [`docs/theory.md`](docs/theory.md) remain follow-up work. See [Status](#status).
 
 ## The idea in one paragraph
 
@@ -68,7 +70,9 @@ GraphRAG-Merger/
 │   ├── edge_reconcile.py       # relationship reconciliation (+ versioning, conflicts)
 │   ├── affected_region.py      # affected-community detection
 │   ├── repair_planner.py       # cheapest-repair-under-threshold planner
-│   └── merge.py                # binary + multi-index merge orchestration
+│   ├── merge.py                # binary + multi-index merge orchestration
+│   └── adapters/
+│       └── graphrag.py         # load/save Microsoft GraphRAG parquet (optional)
 ├── experiments/                # synthetic benchmark harness
 │   ├── make_synthetic_indexes.py   # planted-phenomena generator + ground truth
 │   ├── run_merge.py                # naive / name-only / semantic comparison
@@ -139,16 +143,30 @@ See [`docs/experiments.md`](docs/experiments.md) for the full metric definitions
 
 The staged plan lives in [`docs/codex_tasks.md`](docs/codex_tasks.md) as four
 ordered GitHub-issue prompts (written so the **Codex cloud agent** — sandboxed
-with no network access — has all context in-repo). Tasks 1–3 are implemented;
-Task 4 remains:
+with no network access — has all context in-repo). All four are implemented:
 
 1. ✅ **MVP semantic index merge prototype** — algorithmic modules + tests.
 2. ✅ **Synthetic conflict-heavy benchmark and metrics** — offline harness.
 3. ✅ **Multi-index semantic merge planner** — `merge_k_indexes` + strategies.
-4. ⬜ **GraphRAG parquet adapter** — load/save real GraphRAG outputs.
+4. ✅ **GraphRAG parquet adapter** — load/save real GraphRAG outputs.
 
 The formal proofs in [`docs/theory.md`](docs/theory.md) remain a skeleton (each
 theorem is stated and tied to its module); filling them in is follow-up work.
+
+### Use the GraphRAG adapter
+
+```python
+from semantic_merge.adapters.graphrag import load_graphrag, save_graphrag
+from semantic_merge import merge_two_indexes
+from semantic_merge.schema import MergeConfig
+
+a = load_graphrag("ragtest_a/output")     # a GraphRAG output directory
+b = load_graphrag("ragtest_b/output")
+merged = merge_two_indexes(a, b, MergeConfig())
+save_graphrag(merged, "merged/output")
+```
+
+Requires the extra: `pip install -e ".[graphrag]"` (pandas + pyarrow).
 
 ## Status
 
@@ -157,11 +175,11 @@ theorem is stated and tied to its module); filling them in is follow-up work.
 | `schema.py` (data model) | ✅ implemented |
 | Binary merge pipeline (`merge_two_indexes`) | ✅ implemented |
 | Algorithmic modules (bridge/prune/fuse/reconcile/region/repair) | ✅ implemented |
-| Unit + integration tests | ✅ 21 passing |
+| Unit + integration tests | ✅ 24 passing |
 | Synthetic benchmark + metrics | ✅ implemented |
 | Multi-index planner (`merge_k_indexes`) | ✅ implemented |
+| GraphRAG parquet adapter | ✅ implemented (optional extra) |
 | Theory proofs (`docs/theory.md`) | ⬜ skeleton (stated, not proved) |
-| GraphRAG parquet adapter | ⬜ Task 4 |
 
 ## License
 
