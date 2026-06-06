@@ -12,10 +12,10 @@ This repo is a research prototype: a clean, dependency-light Python package
 module by an agent** following the staged plan in
 [`docs/codex_tasks.md`](docs/codex_tasks.md).
 
-> **Status: scaffold.** The data model ([`semantic_merge/schema.py`](semantic_merge/schema.py))
-> is implemented and importable. The algorithmic modules expose their final
-> signatures with full docstrings and raise `NotImplementedError` — they are
-> filled in by **Task 1**. See [Status](#status).
+> **Status: MVP implemented (Tasks 1–3).** The full binary-merge pipeline, the
+> multi-index planner, the offline synthetic benchmark, and the test suite are
+> implemented and green (21 tests, zero third-party runtime deps). The GraphRAG
+> parquet adapter (Task 4) is the remaining piece. See [Status](#status).
 
 ## The idea in one paragraph
 
@@ -58,92 +58,109 @@ GraphRAG-Merger/
 │   ├── theory.md               # theorem skeleton, each tied to a module
 │   ├── experiments.md          # synthetic benchmark + metrics + baselines
 │   └── codex_tasks.md          # staged build plan (paste into GitHub issues)
-├── semantic_merge/             # the package
-│   ├── schema.py               # ✅ data model (implemented)
+├── semantic_merge/             # the package (pure stdlib)
+│   ├── schema.py               # data model (dataclasses, configs, result types)
+│   ├── util.py                 # name normalization + similarity helpers
 │   ├── loader.py               # JSON (de)serialization
-│   ├── bridge.py               # semantic bridge discovery
+│   ├── bridge.py               # semantic bridge discovery (multi-signal + blocking)
 │   ├── prune.py                # robust pruning (preserves ambiguity/conflict)
-│   ├── entity_merge.py         # conflict-aware entity fusion
-│   ├── edge_reconcile.py       # relationship reconciliation
+│   ├── entity_merge.py         # conflict-aware entity fusion (union-find)
+│   ├── edge_reconcile.py       # relationship reconciliation (+ versioning, conflicts)
 │   ├── affected_region.py      # affected-community detection
 │   ├── repair_planner.py       # cheapest-repair-under-threshold planner
-│   └── merge.py                # binary merge orchestration
+│   └── merge.py                # binary + multi-index merge orchestration
 ├── experiments/                # synthetic benchmark harness
-│   ├── make_synthetic_indexes.py
-│   ├── run_merge.py
+│   ├── make_synthetic_indexes.py   # planted-phenomena generator + ground truth
+│   ├── run_merge.py                # naive / name-only / semantic comparison
+│   ├── run_multi_merge.py          # multi-index merge-order strategies
 │   ├── eval_index_quality.py
 │   └── eval_cost.py
-└── tests/                      # unit tests (pytest)
+└── tests/                      # unit + integration tests (pytest)
 ```
 
 ## Install
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ".[dev]"      # only dev extra (pytest); runtime deps: none
 ```
 
-Requires Python ≥ 3.10. Core dependencies are minimal (`numpy` for embedding
-similarity); `pytest` for the test suite.
+Requires Python ≥ 3.10. The package has **zero third-party runtime
+dependencies** — pure standard library.
 
 ## Quickstart
 
-The data model is usable today:
-
 ```python
-from semantic_merge import SemanticIndex, Entity, MergeConfig
+from semantic_merge import SemanticIndex, Entity, Relationship, MergeConfig, merge_two_indexes
 
-idx = SemanticIndex(name="demo")
-idx.add_entity(Entity(id="e1", name="Ada Lovelace", type="person",
-                      aliases=["Ada", "A. Lovelace"]))
-print(idx.n_entities)  # 1
+a = SemanticIndex(name="A")
+a.add_entity(Entity(id="a1", name="Ada Lovelace", type="person", aliases=["A. Lovelace"]))
+
+b = SemanticIndex(name="B")
+b.add_entity(Entity(id="b1", name="Ada Lovelace", type="person"))   # same entity, other index
+
+merged = merge_two_indexes(a, b, MergeConfig(namespace_ids=False))
+print(merged.n_entities)                       # 1  (the two were fused)
+print(merged.metadata["id_map"])               # {'a1': 'a1', 'b1': 'a1'}  (canonical)
 ```
-
-`merge_two_indexes(a, b, MergeConfig())` is wired end-to-end but its leaf steps
-land in Task 1.
 
 ## Run the tests
 
 ```bash
-pytest
+pytest        # 21 passed
 ```
-
-Test stubs currently `skip` with the assertions they should make; Task 1
-replaces the skips with real tests.
 
 ## Run the experiments
 
-Implemented in Task 2 (synthetic benchmark). Once landed:
-
 ```bash
-python -m experiments.run_merge        # compare naive / name-only / semantic merge
+# Binary merge: naive union vs name-only vs semantic, on a conflict-heavy pair
+python -m experiments.run_merge --n 200 --overlap 0.4 --conflict-rate 0.3
+
+# Multi-index merge-order strategies across k = 2, 4, 8, 16
+python -m experiments.run_multi_merge
 ```
 
-See [`docs/experiments.md`](docs/experiments.md) for the metrics and the
-comparisons we expect to demonstrate.
+Representative `run_merge` output (lower `dup_rate`/`wrong_merge` better, higher
+`conflict_keep` better):
 
-## How this repo gets built (for the agent)
+```
+strategy       dup_rate  wrong_merge  conflict_keep  affected  repaired  compares
+naive_union        1.00         0.00           0.00         0         0         0
+name_only          0.60         1.00           0.00         0         0         0
+semantic           0.00         0.00           1.00        25        23      5089
+```
 
-This repo is designed to be implemented by the **Codex cloud agent**, which runs
-sandboxed with **no network access** — so every bit of context it needs is
-already committed here (docs + schema + this README). Work proceeds as four
-ordered GitHub issues; paste each prompt from [`docs/codex_tasks.md`](docs/codex_tasks.md):
+The semantic merge reaches **low duplicate rate AND low wrong-merge AND high
+conflict preservation simultaneously** — the Pareto point neither baseline can,
+while scoring far fewer than the `N_small · N_large` brute-force comparisons.
+See [`docs/experiments.md`](docs/experiments.md) for the full metric definitions.
 
-1. **Implement MVP semantic index merge prototype** — fill in the algorithmic modules + tests.
-2. **Add synthetic conflict-heavy benchmark and metrics** — the offline experiment harness.
-3. **Implement multi-index semantic merge planner** — `merge_k_indexes` + merge-order strategies.
-4. **Add GraphRAG parquet adapter** — load/save real GraphRAG outputs.
+## Build plan & remaining work
+
+The staged plan lives in [`docs/codex_tasks.md`](docs/codex_tasks.md) as four
+ordered GitHub-issue prompts (written so the **Codex cloud agent** — sandboxed
+with no network access — has all context in-repo). Tasks 1–3 are implemented;
+Task 4 remains:
+
+1. ✅ **MVP semantic index merge prototype** — algorithmic modules + tests.
+2. ✅ **Synthetic conflict-heavy benchmark and metrics** — offline harness.
+3. ✅ **Multi-index semantic merge planner** — `merge_k_indexes` + strategies.
+4. ⬜ **GraphRAG parquet adapter** — load/save real GraphRAG outputs.
+
+The formal proofs in [`docs/theory.md`](docs/theory.md) remain a skeleton (each
+theorem is stated and tied to its module); filling them in is follow-up work.
 
 ## Status
 
 | Component | State |
 |---|---|
 | `schema.py` (data model) | ✅ implemented |
-| Pipeline orchestration (`merge.py` data-flow) | ✅ wired (leaves pending) |
-| Algorithmic modules (bridge/prune/fuse/reconcile/region/repair) | ⬜ Task 1 |
-| Unit tests | ⬜ Task 1 (stubs in place) |
-| Synthetic benchmark + metrics | ⬜ Task 2 |
-| Multi-index planner | ⬜ Task 3 |
+| Binary merge pipeline (`merge_two_indexes`) | ✅ implemented |
+| Algorithmic modules (bridge/prune/fuse/reconcile/region/repair) | ✅ implemented |
+| Unit + integration tests | ✅ 21 passing |
+| Synthetic benchmark + metrics | ✅ implemented |
+| Multi-index planner (`merge_k_indexes`) | ✅ implemented |
+| Theory proofs (`docs/theory.md`) | ⬜ skeleton (stated, not proved) |
 | GraphRAG parquet adapter | ⬜ Task 4 |
 
 ## License

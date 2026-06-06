@@ -52,20 +52,40 @@ Cost ([`eval_cost.py`](../experiments/eval_cost.py)):
 - **bridge comparisons** — should track `N_s · log N_l`, not `N_s · N_l`.
 - **repair cost** — proxy for LLM regenerations avoided vs full rebuild.
 
-## Headline comparisons we expect to show
+## Headline comparison (observed)
 
-- Ours achieves **low duplicate rate AND high conflict preservation
-  simultaneously** — the Pareto point neither baseline can reach (name-only gets
-  one or the other depending on threshold; naive union gets neither).
-- Repair cost and affected-community count grow with **planted overlap/conflict
-  rate**, not with total index size — evidence of locality.
+`python -m experiments.run_merge --n 200 --overlap 0.4 --conflict-rate 0.3`:
 
-## Multi-index experiments (task 3)
+```
+strategy       dup_rate  wrong_merge  conflict_keep  affected  repaired  compares
+naive_union        1.00         0.00           0.00         0         0         0
+name_only          0.60         1.00           0.00         0         0         0
+semantic           0.00         0.00           1.00        25        23      5089
+```
 
-Vary `k ∈ {2, 4, 8, 16}`. For each `k`, compare merge-order strategies
-(`random`, `small_first`, `large_first`, `semantic_aware`) on total merge time
-and final index quality. Expect `semantic_aware` ≈ best total cost, with the gap
-over `random` widening as `k` grows.
+- The semantic merge achieves **low duplicate rate AND low wrong-merge rate AND
+  high conflict preservation simultaneously** — the Pareto point neither baseline
+  reaches. Naive union fuses nothing (duplicate rate 1.0); name-only misses
+  alias-variation duplicates (≈0.6) *and* wrongly fuses same-name-different
+  entities (wrong-merge 1.0), and neither baseline preserves a single conflict.
+- `compares` (≈5k) is well under the `N_small · N_large` brute-force product
+  (≈20k here), confirming the blocking claim.
+- Results are stable across seeds; raise `--conflict-rate` to stress conflict
+  preservation, `--overlap` to stress fusion.
+
+## Multi-index experiments (observed)
+
+`python -m experiments.run_multi_merge` varies `k ∈ {2, 4, 8, 16}` and compares
+`random`, `small_first`, `large_first`, `semantic_aware` on total bridge
+comparisons, wall-clock, and final entity count (vs. the ideal `universe` size).
+
+Observed: merge **order affects both total comparisons and final dedup quality**;
+`semantic_aware` is consistently *among* the cheapest on comparisons and reaches
+dedup quality at least as good as the baselines. The effect is real but modest
+at this scale — total work is partly conserved because every duplicate must be
+reconciled eventually regardless of order — and `semantic_aware` pays an
+`O(k²)`-per-round estimator overhead that shows up in wall-clock at `k = 16`. A
+larger, more size-skewed universe widens the order-sensitivity gap.
 
 ## Reproducibility
 

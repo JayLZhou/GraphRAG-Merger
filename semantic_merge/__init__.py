@@ -18,7 +18,7 @@ from . import (
     repair_planner,
     schema,
 )
-from .merge import merge_two_indexes
+from .merge import estimate_merge_cost, merge_k_indexes, merge_two_indexes
 from .schema import (
     AmbiguitySet,
     BridgeCandidate,
@@ -53,8 +53,10 @@ __all__ = [
     "affected_region",
     "repair_planner",
     "merge",
-    # entrypoint
+    # entrypoints
     "merge_two_indexes",
+    "merge_k_indexes",
+    "estimate_merge_cost",
     # data model
     "TextUnit",
     "Entity",

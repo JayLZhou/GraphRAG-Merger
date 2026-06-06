@@ -1,18 +1,19 @@
 """Cost metrics for a merge run.
 
-Measures the resources the merge consumed, to contrast incremental merging with
-a notional full rebuild:
-
-  * **merge time**            — wall-clock seconds for the pipeline.
-  * **bridge comparisons**    — number of entity pairs actually scored (tests
-    the blocking claim: should be ``~ N_small * log N_large``, not quadratic).
-  * **repair cost**           — summed estimated cost of the repair plan
-    (proxy for LLM summary regenerations avoided).
+  * **merge_seconds**      — wall-clock for the pipeline.
+  * **bridge_comparisons** — entity pairs actually scored (tests the blocking
+    claim: ``~ N_small * log N_large`` rather than the quadratic product).
+  * **repair_cost**        — summed estimated cost of the repair plan (proxy for
+    the LLM summary regenerations a full rebuild would have paid).
 """
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
+from typing import Any, Callable, Tuple
+
+from semantic_merge.schema import RepairPlan, SemanticIndex
 
 
 @dataclass
@@ -22,10 +23,18 @@ class CostReport:
     repair_cost: float
 
 
-def time_merge(merge_callable, *args, **kwargs):  # pragma: no cover
-    """Run ``merge_callable(*args, **kwargs)``, returning ``(result, CostReport)``.
+def cost_of(merged: SemanticIndex) -> Tuple[int, float]:
+    """Extract (bridge_comparisons, repair_cost) from a merged index's metadata."""
+    comparisons = int(merged.metadata.get("bridge_comparisons", 0))
+    plan: RepairPlan = merged.metadata.get("repair_plan")
+    repair_cost = plan.total_cost if plan is not None else 0.0
+    return comparisons, repair_cost
 
-    Use ``time.perf_counter()`` for wall-clock; surface ``bridge_comparisons``
-    and ``repair_cost`` via instrumentation hooks on the pipeline.
-    """
-    raise NotImplementedError("TODO(codex task 2): implement cost measurement")
+
+def time_merge(merge_callable: Callable[..., SemanticIndex], *args: Any, **kwargs: Any) -> Tuple[SemanticIndex, CostReport]:
+    """Run ``merge_callable(*args, **kwargs)`` and return ``(result, CostReport)``."""
+    start = time.perf_counter()
+    result = merge_callable(*args, **kwargs)
+    elapsed = time.perf_counter() - start
+    comparisons, repair_cost = cost_of(result)
+    return result, CostReport(merge_seconds=elapsed, bridge_comparisons=comparisons, repair_cost=repair_cost)

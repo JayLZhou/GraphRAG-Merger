@@ -12,11 +12,10 @@ license = { text = "MIT" }
 authors = [{ name = "JayLZhou" }]
 keywords = ["graphrag", "rag", "knowledge-graph", "index-merge", "retrieval"]
 
-# Core stays dependency-light on purpose: the data model and algorithms are
-# pure Python. numpy is only needed for embedding similarity.
-dependencies = [
-    "numpy>=1.23",
-]
+# Zero third-party runtime dependencies on purpose: the data model, algorithms,
+# similarity helpers, and synthetic benchmark are all pure standard-library
+# Python. (A future GraphRAG parquet adapter will add pandas/pyarrow lazily.)
+dependencies = []
 
 [project.optional-dependencies]
 dev = [

@@ -1,5 +1,11 @@
 # Codex Tasks
 
+> **Status:** Tasks 1–3 are **implemented and tested** (21 passing tests, working
+> binary + multi-index merge, synthetic benchmark). **Task 4 (GraphRAG parquet
+> adapter) is the active next task.** The prompts for 1–3 are kept below as a
+> record of scope and as regression specs. Filling in the formal proofs in
+> [`theory.md`](theory.md) is separate follow-up work.
+
 Staged build plan for the Codex cloud agent. Each task is a self-contained
 GitHub issue: copy the **Prompt** block into the issue body. Do the tasks **in
 order** — later tasks assume earlier ones landed.
@@ -23,7 +29,7 @@ Global constraints (repeat in every issue):
 
 ---
 
-## Task 1 — Implement MVP semantic index merge prototype
+## Task 1 — Implement MVP semantic index merge prototype  ✅ done
 
 **Issue title:** `Implement MVP semantic index merge prototype`
 
@@ -83,7 +89,7 @@ docstrings + type hints. Update the README "Status" section to mark task 1 done.
 
 ---
 
-## Task 2 — Add synthetic conflict-heavy benchmark and metrics
+## Task 2 — Add synthetic conflict-heavy benchmark and metrics  ✅ done
 
 **Issue title:** `Add synthetic conflict-heavy benchmark and metrics`
 
@@ -117,7 +123,7 @@ and offline.
 
 ---
 
-## Task 3 — Implement multi-index semantic merge planner
+## Task 3 — Implement multi-index semantic merge planner  ✅ done
 
 **Issue title:** `Implement multi-index semantic merge planner`
 
@@ -146,7 +152,7 @@ offline.
 
 ---
 
-## Task 4 — Add GraphRAG parquet adapter
+## Task 4 — Add GraphRAG parquet adapter  ⬅ next
 
 **Issue title:** `Add GraphRAG parquet adapter`
 

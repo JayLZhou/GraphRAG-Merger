@@ -1,28 +1,33 @@
 """Affected-region detection.
 
-A merge only perturbs part of the graph. The *affected region* is the set of
-communities whose membership, internal edges, or boundary changed as a result
-of entity fusion and edge reconciliation. Repair (summary regeneration,
-reclustering) should touch only this region — that locality is what makes
-incremental merging cheaper than a full rebuild (see ``docs/theory.md``,
-"affected region completeness").
+The *affected region* is the set of communities whose membership, internal
+edges, or boundary changed as a result of the merge. Repair should touch only
+this region — that locality is what makes incremental merging cheaper than a
+full rebuild.
 
-A community is affected if any of:
-  * one of its entities was fused, split, or remapped;
-  * an internal or boundary relationship was added, versioned, or flagged
-    conflicting;
-  * its entity/edge membership count changed.
+A base community is affected if any of:
+  * one of its (canonical) entities was fused / changed;
+  * a new entity attaches to one of its members via a reconciled edge;
+  * a conflicting edge is incident to its members;
+  * an entity-level conflict (ambiguity / same-name) references its members.
 
-Completeness requirement: every community that a full rebuild would change must
-be reported. Over-reporting is safe (wasteful); under-reporting is a
-correctness bug.
+Detection over-approximates on purpose: reporting an unchanged community is
+merely wasteful, while *missing* a changed one is a correctness bug
+(completeness, see ``docs/theory.md`` §6).
 """
 
 from __future__ import annotations
 
 from typing import Dict, List, Set
 
-from .schema import ConflictSet, Relationship, SemanticIndex
+from .schema import ConflictKind, ConflictSet, Relationship, SemanticIndex
+
+_ENTITY_CONFLICT_KINDS = {
+    ConflictKind.AMBIGUOUS_BRIDGE,
+    ConflictKind.SAME_NAME_DIFFERENT_ENTITY,
+    ConflictKind.TEMPORAL_CONFLICT,
+    ConflictKind.INCOMPATIBLE_TYPE,
+}
 
 
 def detect_affected_communities(
@@ -32,12 +37,40 @@ def detect_affected_communities(
     conflicts: List[ConflictSet],
     changed_entity_ids: Set[str],
 ) -> Set[str]:
-    """Return the ids of communities affected by the merge.
+    """Return the ids of communities affected by the merge (complete superset)."""
+    ent2comm: Dict[str, str] = {}
+    for comm in base_index.communities.values():
+        for ent_id in comm.entity_ids:
+            ent2comm[ent_id] = comm.id
+    base_entity_ids = set(base_index.entities)
 
-    ``base_index`` supplies the community structure to diff against;
-    ``changed_entity_ids`` and the reconciled edges/conflicts drive the
-    detection. Must be complete (no false negatives).
-    """
-    raise NotImplementedError(
-        "TODO(codex task 1): implement complete affected-community detection"
-    )
+    affected: Set[str] = set()
+
+    # 1. fused / changed canonical entities.
+    for cid in changed_entity_ids:
+        if cid in ent2comm:
+            affected.add(ent2comm[cid])
+
+    # 2-3. edge-driven: new attachments and conflicting edges.
+    for rel in merged_relationships.values():
+        endpoints = (rel.source, rel.target)
+        if rel.attributes.get("conflicting"):
+            for ep in endpoints:
+                if ep in ent2comm:
+                    affected.add(ent2comm[ep])
+        new_eps = [ep for ep in endpoints if ep not in base_entity_ids]
+        if len(new_eps) == 1:  # exactly one new endpoint attaching to the base
+            for ep in endpoints:
+                if ep in ent2comm:
+                    affected.add(ent2comm[ep])
+
+    # 4. entity-level conflicts referencing community members.
+    for cs in conflicts:
+        if cs.kind not in _ENTITY_CONFLICT_KINDS:
+            continue
+        for member in cs.member_ids:
+            canon = id_map.get(member, member)
+            if canon in ent2comm:
+                affected.add(ent2comm[canon])
+
+    return affected

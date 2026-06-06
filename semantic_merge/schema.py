@@ -273,6 +273,8 @@ class BridgeResult:
     candidates: List[BridgeCandidate] = field(default_factory=list)
     # source entity id -> its candidate matches, best first
     by_source: Dict[str, List[BridgeCandidate]] = field(default_factory=dict)
+    # number of entity pairs actually scored (tests the blocking claim)
+    comparisons: int = 0
 
 
 @dataclass
@@ -348,6 +350,8 @@ class MergeConfig:
 
     # -- bridge discovery -----------------------------------------------------
     # Weights for combining individual similarity signals into a bridge score.
+    # Weights are renormalized over the signals actually available for a pair,
+    # so absent embeddings/timestamps degrade gracefully.
     w_name: float = 0.30
     w_alias: float = 0.15
     w_type: float = 0.10
@@ -355,22 +359,25 @@ class MergeConfig:
     w_neighbor: float = 0.10
     w_temporal: float = 0.05
     # Minimum combined score for a pair to be considered a candidate at all.
-    candidate_threshold: float = 0.5
+    candidate_threshold: float = 0.35
 
     # -- pruning --------------------------------------------------------------
     # Keep at most M candidate bridges per source entity.
     max_candidates_per_entity: int = 5
     # Above -> HIGH (fuse); between -> AMBIGUOUS (preserve); below -> LOW.
-    high_confidence_threshold: float = 0.85
-    ambiguous_threshold: float = 0.65
+    high_confidence_threshold: float = 0.70
+    ambiguous_threshold: float = 0.50
+    # If the top two viable candidates are within this score margin, the match
+    # is treated as ambiguous (we cannot confidently pick one) and preserved.
+    ambiguous_margin: float = 0.08
 
-    # -- repair planner: drift weights ---------------------------------------
-    alpha: float = 0.30  # entity_change_ratio
-    beta: float = 0.25   # edge_change_ratio
-    gamma: float = 0.20  # boundary_change
-    delta: float = 0.15  # conflict_density
+    # -- repair planner: drift weights (sum to 1.0) --------------------------
+    alpha: float = 0.35    # entity_change_ratio
+    beta: float = 0.20     # edge_change_ratio
+    gamma: float = 0.15    # boundary_change
+    delta: float = 0.20    # conflict_density
     epsilon: float = 0.10  # summary_coverage_drop
-    drift_threshold: float = 0.30
+    drift_threshold: float = 0.25
     coverage_threshold: float = 0.80
 
     # -- embeddings -----------------------------------------------------------
@@ -382,6 +389,11 @@ class MergeConfig:
     c_gamma: float = 1.0   # conflict_risk
     c_delta: float = 1.0   # affected_communities
     c_epsilon: float = 1.0  # summary_repair_cost
+
+    # When True, entity/relationship ids are prefixed per-index before merging
+    # so the two id spaces cannot collide. Turn off when ids are already
+    # globally unique (e.g. synthetic experiments) so id_map keys stay original.
+    namespace_ids: bool = True
 
     # Misc knobs accessible to any stage without changing the signature.
     extra: Dict[str, object] = field(default_factory=dict)

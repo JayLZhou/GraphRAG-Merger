@@ -6,18 +6,36 @@ bounded set without discarding genuine uncertainty. The guiding principle is
 failure mode a naive merge exhibits.
 
 Rules:
-  1. keep at most ``M = config.max_candidates_per_entity`` candidates per
-     source entity (highest score first);
-  2. filter candidates that are type- or time-*incompatible* (hard violations);
-  3. preserve ambiguous candidates (score in the ambiguous band, or near-ties
-     among the top candidates) as :class:`~semantic_merge.schema.AmbiguitySet`;
-  4. preserve conflict candidates (e.g. same name, incompatible type/time) so
-     downstream stages can record them rather than overwrite evidence.
+  1. keep at most ``M = config.max_candidates_per_entity`` candidates per source;
+  2. route hard type/time-*incompatible* candidates: if they nonetheless look
+     like the same entity (high name similarity) they are **conflicts**
+     (same-name-different-entity / temporal), otherwise they are dropped;
+  3. among compatible candidates, a single clear winner above the high-confidence
+     threshold is **retained** for fusion;
+  4. compatible candidates that are merely plausible (ambiguous band), or a top
+     pair too close to separate, are **preserved** as ambiguity sets — never
+     silently fused or dropped.
 """
 
 from __future__ import annotations
 
-from .schema import BridgeResult, MergeConfig, PruneResult, SemanticIndex
+from typing import List
+
+from .schema import (
+    AmbiguitySet,
+    BridgeCandidate,
+    BridgeConfidence,
+    BridgeResult,
+    ConflictKind,
+    MergeConfig,
+    PruneResult,
+    SemanticIndex,
+)
+
+
+def _is_hard_incompatible(cand: BridgeCandidate) -> bool:
+    """Type known-mismatch or disjoint validity intervals."""
+    return cand.features.get("type", 0.5) == 0.0 or cand.features.get("temporal", 1.0) == 0.0
 
 
 def robust_semantic_prune(
@@ -26,15 +44,47 @@ def robust_semantic_prune(
     index_large: SemanticIndex,
     config: MergeConfig,
 ) -> PruneResult:
-    """Prune ``bridges`` into retained / ambiguous / conflict sets.
+    """Prune ``bridges`` into retained / ambiguous / conflict sets."""
+    result = PruneResult()
 
-    Returns a :class:`~semantic_merge.schema.PruneResult` with:
-      * ``retained``   — bounded, compatible candidates eligible for fusion;
-      * ``ambiguities`` — preserved ambiguity sets (one per uncertain source);
-      * ``conflicts``  — candidates flagged as conflicting rather than droppable.
+    for source_id, cands in bridges.by_source.items():
+        top = cands[: config.max_candidates_per_entity]
 
-    Must never silently delete a candidate that represents a genuine conflict.
-    """
-    raise NotImplementedError(
-        "TODO(codex task 1): implement RobustSemanticPrune (bound M, preserve ambiguity/conflict)"
-    )
+        viable: List[BridgeCandidate] = []
+        for c in top:
+            if _is_hard_incompatible(c):
+                # Same name but incompatible type/time -> a real conflict to keep.
+                # (entity_merge re-derives the ConflictKind from these features.)
+                if c.features.get("name", 0.0) >= config.ambiguous_threshold:
+                    c.confidence = BridgeConfidence.LOW
+                    result.conflicts.append(c)
+                # otherwise: incompatible and not similar -> genuinely drop it.
+                continue
+            viable.append(c)
+
+        if not viable:
+            continue
+
+        best = viable[0]
+        runner = viable[1] if len(viable) > 1 else None
+        close_call = runner is not None and runner.score >= config.ambiguous_threshold and (
+            best.score - runner.score
+        ) < config.ambiguous_margin
+
+        if best.score >= config.high_confidence_threshold and not close_call:
+            best.confidence = BridgeConfidence.HIGH
+            result.retained.append(best)
+        elif best.score >= config.ambiguous_threshold:
+            contenders = [c for c in viable if c.score >= config.ambiguous_threshold]
+            for c in contenders:
+                c.confidence = BridgeConfidence.AMBIGUOUS
+            result.ambiguities.append(
+                AmbiguitySet(
+                    source_id=source_id,
+                    candidates=contenders,
+                    reason=ConflictKind.AMBIGUOUS_BRIDGE,
+                )
+            )
+        # else: best below ambiguous band -> low confidence, no action.
+
+    return result
