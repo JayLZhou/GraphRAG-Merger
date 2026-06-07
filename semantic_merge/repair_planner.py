@@ -170,6 +170,7 @@ def _action_cost(action: RepairAction, info: Dict[str, float], config: MergeConf
         content_tokens=info["content_tokens"],
         summary_tokens=info["summary_tokens"],
         n_sub=int(info["n_sub"]),
+        child_summary_tokens=info.get("child_summary_tokens", 0.0),
     )
 
 
@@ -183,6 +184,12 @@ def _residual_and_coverage(
     if action is RepairAction.PATCH_SUMMARY:
         cov = 1.0 if not info["has_summary"] else old_cov
         return drift - config.epsilon * info["scd"], cov
+    if action is RepairAction.COMPOSE_SUMMARY:
+        # recompose from (conflict-aware) child/source summaries: refreshes
+        # coverage and reflects conflicts, but does not re-read raw content so
+        # leaves structural drift (entity/edge/boundary) untouched — same
+        # residual as a from-text regen, just cheaper.
+        return drift - config.epsilon * info["scd"] - config.delta * info["cd"], 1.0
     if action is RepairAction.REGENERATE_SUMMARY:
         return drift - config.epsilon * info["scd"] - config.delta * info["cd"], 1.0
     if action is RepairAction.LOCAL_RECLUSTER:
@@ -190,14 +197,36 @@ def _residual_and_coverage(
     return 0.0, 1.0  # FULL_REGION_REBUILD
 
 
-# Cheapest-first ladder.
+def _conflict_faithful(action: RepairAction, info: Dict[str, float]) -> bool:
+    """A community with a live conflict must end up with a conflict-aware summary.
+
+    NOOP and PATCH do not rewrite the summary to reflect a contradiction, so they
+    are unfaithful whenever the community carries conflict density; every
+    (re)generating action (COMPOSE/REGEN/RECLUSTER/REBUILD) is faithful.
+    """
+    if info["cd"] > 0.0 and action in (RepairAction.NOOP, RepairAction.PATCH_SUMMARY):
+        return False
+    return True
+
+
+# Local (non-subtree-spanning) repair actions, simplest-first for tie-breaking.
 _LADDER = [
     RepairAction.NOOP,
     RepairAction.PATCH_SUMMARY,
+    RepairAction.COMPOSE_SUMMARY,
     RepairAction.REGENERATE_SUMMARY,
     RepairAction.LOCAL_RECLUSTER,
     RepairAction.FULL_REGION_REBUILD,
 ]
+
+
+def _feasible(residual: float, coverage: float, action: RepairAction,
+              info: Dict[str, float], config: MergeConfig) -> bool:
+    return (
+        residual <= config.drift_threshold
+        and coverage >= config.coverage_threshold
+        and _conflict_faithful(action, info)
+    )
 
 
 def plan_community_repair(
@@ -221,7 +250,7 @@ def plan_community_repair(
     best: Optional[RepairDecision] = None
     for action in _LADDER:
         residual, coverage = _residual_and_coverage(action, drift, info, config)
-        if residual <= config.drift_threshold and coverage >= config.coverage_threshold:
+        if _feasible(residual, coverage, action, info, config):
             cost = _action_cost(action, info, config)
             if best is None or cost < best.estimated_cost:
                 best = RepairDecision(
@@ -258,3 +287,167 @@ def plan_local_repairs(
         if decision.action is not RepairAction.NOOP:
             decisions.append(decision)
     return RepairPlan(decisions=decisions)
+
+
+# ---------------------------------------------------------------------------
+# Tree-DP over the community hierarchy (the cost-optimal repair planner)
+# ---------------------------------------------------------------------------
+
+# Local actions only fix a node's own summary (given its children are handled
+# separately); RECLUSTER/REBUILD at a node are *subtree-spanning* and subsume
+# all descendants.
+_LOCAL_ACTIONS = [
+    RepairAction.NOOP,
+    RepairAction.PATCH_SUMMARY,
+    RepairAction.COMPOSE_SUMMARY,
+    RepairAction.REGENERATE_SUMMARY,
+]
+_SUBTREE_ACTIONS = [RepairAction.LOCAL_RECLUSTER, RepairAction.FULL_REGION_REBUILD]
+
+
+def plan_repairs_tree(
+    base_index: SemanticIndex,
+    affected_communities: Set[str],
+    id_map: Dict[str, str],
+    merged_relationships: Dict[str, Relationship],
+    conflicts: List[ConflictSet],
+    changed_entity_ids: Set[str],
+    config: MergeConfig,
+) -> RepairPlan:
+    """Cost-optimal repair plan over a hierarchical community partition (tree-DP).
+
+    For each node the planner compares (B) repairing the children's subtrees
+    independently then locally fixing this node's summary — where a parent can
+    *compose* its updated children's summaries cheaply — against (A) a single
+    subtree-spanning action (RECLUSTER/REBUILD) at this node that subsumes all
+    descendants. `cost(v) = min(subtree_action(v), local(v) + Σ_children cost(c))`,
+    computed bottom-up in O(|C|). For independent communities this reduces to the
+    per-community planner; the win is when many descendant repairs roll up such
+    that one ancestor action is cheaper.
+    """
+    comms = base_index.communities
+    children_map = {cid: [c for c in comm.children_ids if c in comms] for cid, comm in comms.items()}
+    roots = [cid for cid, comm in comms.items()
+             if not comm.parent_id or comm.parent_id not in comms]
+
+    info_cache: Dict[str, Tuple[float, Dict[str, float]]] = {}
+
+    def get(cid: str) -> Tuple[float, Dict[str, float]]:
+        if cid not in info_cache:
+            info_cache[cid] = _drift_components(
+                cid, base_index, id_map, merged_relationships, conflicts, changed_entity_ids, config
+            )
+        return info_cache[cid]
+
+    tok_memo: Dict[str, float] = {}
+    leaf_memo: Dict[str, int] = {}
+
+    def subtree_tokens(cid: str) -> float:
+        # Raw source text under a subtree = sum over its LEAVES (a parent's
+        # entity_ids are the union of its children, so adding both double-counts).
+        if cid not in tok_memo:
+            kids = children_map[cid]
+            if not kids:
+                tok_memo[cid] = get(cid)[1]["content_tokens"]
+            else:
+                tok_memo[cid] = sum(subtree_tokens(c) for c in kids)
+        return tok_memo[cid]
+
+    def subtree_leaves(cid: str) -> int:
+        if cid not in leaf_memo:
+            kids = children_map[cid]
+            leaf_memo[cid] = 1 if not kids else sum(subtree_leaves(c) for c in kids)
+        return leaf_memo[cid]
+
+    def best_local(cid: str) -> Optional[RepairDecision]:
+        """Cheapest feasible action that fixes only this node's own summary.
+
+        May be ``None`` for an internal node whose structural drift no local
+        action can satisfy — then the node must rely on a subtree-spanning
+        action (Option A in ``solve``). Leaves use the full ladder, so REBUILD is
+        always feasible and the result is non-None.
+        """
+        drift, base_info = get(cid)
+        kids = children_map[cid]
+        info = dict(base_info)
+        if kids:
+            info["child_summary_tokens"] = sum(
+                _approx_tokens(s.text)
+                for s in (_community_summary(base_index, c) for c in kids) if s is not None
+            )
+        actions = _LOCAL_ACTIONS if kids else _LADDER  # a leaf is its own subtree
+        best: Optional[RepairDecision] = None
+        for a in actions:
+            residual, coverage = _residual_and_coverage(a, drift, info, config)
+            if _feasible(residual, coverage, a, info, config):
+                cost = _action_cost(a, info, config)
+                if best is None or cost < best.estimated_cost:
+                    best = RepairDecision(cid, a, drift, cost, coverage, "tree-DP local")
+        return best
+
+    memo: Dict[str, Tuple[float, Dict[str, RepairDecision]]] = {}
+
+    def solve(cid: str) -> Tuple[float, Dict[str, RepairDecision]]:
+        if cid in memo:
+            return memo[cid]
+        drift, info = get(cid)
+        kids = children_map[cid]
+        local = best_local(cid)
+        if not kids:
+            assert local is not None  # leaf ladder includes REBUILD
+            memo[cid] = (local.estimated_cost, {cid: local})
+            return memo[cid]
+
+        options: List[Tuple[float, Dict[str, RepairDecision]]] = []
+        # Option B: repair children independently + locally fix this node
+        # (only available if some local action satisfies this node's constraints).
+        if local is not None:
+            cost_b = local.estimated_cost
+            plan_b: Dict[str, RepairDecision] = {cid: local}
+            for c in kids:
+                cc, pc = solve(c)
+                cost_b += cc
+                plan_b.update(pc)
+            options.append((cost_b, plan_b))
+        # Option A: a subtree-spanning action here subsumes all descendants
+        # (REBUILD is always feasible, so this option always exists).
+        best_a: Optional[RepairDecision] = None
+        for a in _SUBTREE_ACTIONS:
+            residual, coverage = _residual_and_coverage(a, drift, info, config)
+            if _feasible(residual, coverage, a, info, config):
+                cost = config.cost_model.cost(
+                    a, content_tokens=subtree_tokens(cid),
+                    summary_tokens=info["summary_tokens"], n_sub=subtree_leaves(cid),
+                )
+                if best_a is None or cost < best_a.estimated_cost:
+                    best_a = RepairDecision(cid, a, drift, cost, coverage,
+                                            f"tree-DP subtree ({subtree_leaves(cid)} leaves)")
+        if best_a is not None:
+            options.append((best_a.estimated_cost, {cid: best_a}))  # descendants subsumed
+
+        memo[cid] = min(options, key=lambda o: o[0])
+        return memo[cid]
+
+    chosen: Dict[str, RepairDecision] = {}
+    for r in roots:
+        _, plan = solve(r)
+        chosen.update(plan)
+    return RepairPlan(decisions=[d for d in chosen.values() if d.action is not RepairAction.NOOP])
+
+
+def plan_repairs(
+    base_index: SemanticIndex,
+    affected_communities: Set[str],
+    id_map: Dict[str, str],
+    merged_relationships: Dict[str, Relationship],
+    conflicts: List[ConflictSet],
+    changed_entity_ids: Set[str],
+    config: MergeConfig,
+) -> RepairPlan:
+    """Dispatch: tree-DP if the partition is hierarchical, else per-community."""
+    hierarchical = any(comm.children_ids for comm in base_index.communities.values())
+    planner = plan_repairs_tree if hierarchical else plan_local_repairs
+    return planner(
+        base_index, affected_communities, id_map, merged_relationships,
+        conflicts, changed_entity_ids, config,
+    )

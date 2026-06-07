@@ -16,12 +16,22 @@ from __future__ import annotations
 import dataclasses
 import math
 import random
-from collections import Counter
+from collections import Counter, defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 
-from . import affected_region, bridge, edge_reconcile, entity_merge, prune, repair_planner, util
+from . import (
+    affected_region,
+    bridge,
+    edge_reconcile,
+    entity_merge,
+    partition_reconcile,
+    prune,
+    repair_planner,
+    util,
+)
 from .schema import (
     Community,
+    ConflictKind,
     MergeConfig,
     RepairAction,
     RepairPlan,
@@ -79,10 +89,46 @@ def _namespace(index: SemanticIndex, tag: str) -> SemanticIndex:
     )
 
 
-def _regenerate_summary_text(community: Community, merged: SemanticIndex, action: RepairAction) -> str:
+def _regenerate_summary_text(
+    community: Community, merged: SemanticIndex, action: RepairAction, conflict_notes: List[str],
+) -> str:
+    """Deterministic stand-in for an LLM-regenerated, *conflict-aware* summary.
+
+    (No real LLM call — the text is synthesized from member names. The point is
+    that a regenerated summary for a contested community explicitly surfaces the
+    disagreement instead of silently picking one side.)
+    """
     names = [merged.entities[e].name for e in community.entity_ids if e in merged.entities]
     head = ", ".join(sorted(names)[:8])
-    return f"[{action.value}] {community.title or community.id}: {head}".strip()
+    text = f"[{action.value}] {community.title or community.id}: {head}".strip()
+    if conflict_notes:
+        text += "  Sources disagree: " + "; ".join(conflict_notes[:5]) + "."
+    return text
+
+
+def _community_conflict_notes(merged, id_map, conflicts) -> Dict[str, List[str]]:
+    """Per-community human-readable notes for any conflict touching it."""
+    ent2comm: Dict[str, str] = {
+        e: cid for cid, c in merged.communities.items() for e in c.entity_ids
+    }
+    notes: Dict[str, List[str]] = defaultdict(list)
+    for rel in merged.relationships.values():
+        if rel.attributes.get("conflicting"):
+            note = f"contested '{rel.relation_type}' (claim={rel.attributes.get('claim')})"
+            for ep in (rel.source, rel.target):
+                cid = ent2comm.get(ep)
+                if cid and note not in notes[cid]:
+                    notes[cid].append(note)
+    for cs in conflicts:
+        if cs.kind is ConflictKind.CONTRADICTORY_RELATIONSHIP:
+            continue  # surfaced via conflicting edges above
+        for m in cs.member_ids:
+            cid = ent2comm.get(id_map.get(m, m))
+            if cid:
+                note = cs.reason or cs.kind.value
+                if note not in notes[cid]:
+                    notes[cid].append(note)
+    return notes
 
 
 def merge_two_indexes(
@@ -117,33 +163,25 @@ def merge_two_indexes(
     affected = affected_region.detect_affected_communities(
         large, id_map, merged_relationships, conflicts, changed_entity_ids
     )
-    plan = repair_planner.plan_local_repairs(
+    plan = repair_planner.plan_repairs(
         large, affected, id_map, merged_relationships, conflicts, changed_entity_ids, config
     )
+    hierarchical = any(c.children_ids for c in large.communities.values())
 
-    # 9. assemble: anchor on the larger index's community structure.
+    # 9. assemble. Entities/edges first, then reconcile the two partitions
+    #    (Stage 8), then apply the repair plan to the summaries (Stage 10).
     merged = SemanticIndex(name=f"merged({index_a.name},{index_b.name})")
     merged.embedding_dim = large.embedding_dim or small.embedding_dim
     merged.text_units = {**large.text_units, **small.text_units}
     merged.entities = merged_entities
     merged.relationships = merged_relationships
+    merged.communities = partition_reconcile.reconcile_partitions(
+        small, large, id_map, merged_entities, merged_relationships
+    )
 
-    # Communities carried from base, with relationship_ids recomputed against the
-    # reconciled edges so they stay consistent.
-    members_to_edges: Dict[str, List[str]] = {}
-    for rid, rel in merged_relationships.items():
-        members_to_edges.setdefault(rel.source, []).append(rid)
-        members_to_edges.setdefault(rel.target, []).append(rid)
-    for cid, comm in large.communities.items():
-        member_set = set(comm.entity_ids)
-        rel_ids = sorted(
-            {rid for m in comm.entity_ids for rid in members_to_edges.get(m, [])
-             if merged_relationships[rid].source in member_set
-             and merged_relationships[rid].target in member_set}
-        )
-        merged.communities[cid] = dataclasses.replace(comm, relationship_ids=rel_ids)
-
-    # Summaries carried from base, with the repair plan applied.
+    # Conflict-aware summary maintenance: regenerated summaries for contested
+    # communities explicitly surface the disagreement.
+    notes = _community_conflict_notes(merged, id_map, conflicts)
     decisions = {d.community_id: d for d in plan.decisions}
     for sid, summ in large.summaries.items():
         decision = decisions.get(summ.community_id)
@@ -153,10 +191,12 @@ def merge_two_indexes(
         elif decision.action is RepairAction.PATCH_SUMMARY:
             new_summ.stale = False
             new_summ.attributes["repair"] = decision.action.value
-        else:  # REGENERATE_SUMMARY / LOCAL_RECLUSTER / FULL_REGION_REBUILD
+        else:  # COMPOSE / REGENERATE / LOCAL_RECLUSTER / FULL_REGION_REBUILD
             comm = merged.communities.get(summ.community_id)
             if comm is not None:
-                new_summ.text = _regenerate_summary_text(comm, merged, decision.action)
+                new_summ.text = _regenerate_summary_text(
+                    comm, merged, decision.action, notes.get(summ.community_id, [])
+                )
             new_summ.coverage = 1.0
             new_summ.stale = False
             new_summ.attributes["repair"] = decision.action.value
@@ -166,6 +206,7 @@ def merge_two_indexes(
         "id_map": id_map,
         "conflicts": conflicts,
         "repair_plan": plan,
+        "planner": "tree-dp" if hierarchical else "flat",
         "affected_communities": sorted(affected),
         "bridge_comparisons": bridges.comparisons,
         "n_entities_in": small.n_entities + large.n_entities,

@@ -76,6 +76,7 @@ def build_synthetic_pair(
     overlap: float = 0.3,
     conflict_rate: float = 0.1,
     seed: int = 0,
+    hierarchical: bool = False,
 ) -> Tuple[SemanticIndex, SemanticIndex, GroundTruth]:
     """Build two synthetic indexes plus ground truth.
 
@@ -84,6 +85,8 @@ def build_synthetic_pair(
         overlap: fraction of large entities also present in the small index.
         conflict_rate: fraction of shared entities given conflicting/temporal evidence.
         seed: RNG seed for reproducibility.
+        hierarchical: if True, group leaf communities into level-1 parents
+            (with summaries) so the tree-DP repair planner is exercised.
     """
     rng = random.Random(seed)
     small = SemanticIndex(name="small")
@@ -119,10 +122,12 @@ def build_synthetic_pair(
 
     csize = 8
     comm_of: Dict[str, str] = {}
+    leaf_cids: List[str] = []
     for c, start in enumerate(range(0, n_entities, csize)):
         members = [e.id for e in large_entities[start:start + csize]]
         cid = f"c{c}"
-        large.communities[cid] = Community(id=cid, entity_ids=members, title=f"Community {c}")
+        large.communities[cid] = Community(id=cid, entity_ids=members, level=0, title=f"Community {c}")
+        leaf_cids.append(cid)
         for m in members:
             comm_of[m] = cid
         large.summaries[f"sm{c}"] = Summary(
@@ -130,13 +135,32 @@ def build_synthetic_pair(
             coverage=1.0, source_hash=f"h{c}",
         )
 
-    # a few intra-community relationships in the large index
-    for c, comm in enumerate(large.communities.values()):
-        ms = comm.entity_ids
+    # a few intra-community relationships in the large index (leaves only)
+    for c, cid in enumerate(leaf_cids):
+        ms = large.communities[cid].entity_ids
         for k in range(min(3, len(ms) - 1)):
             r = Relationship(id=f"Lr{c}_{k}", source=ms[k], target=ms[k + 1],
                              relation_type=rng.choice(_REL))
             large.relationships[r.id] = r
+
+    # optional level-1 hierarchy: group leaves into parents (with summaries),
+    # so the tree-DP repair planner has a real community tree to run over.
+    if hierarchical:
+        group = 3
+        for p, start in enumerate(range(0, len(leaf_cids), group)):
+            child_cids = leaf_cids[start:start + group]
+            pid = f"p{p}"
+            members = [m for cc in child_cids for m in large.communities[cc].entity_ids]
+            large.communities[pid] = Community(
+                id=pid, entity_ids=members, level=1, children_ids=list(child_cids),
+                title=f"Parent {p}",
+            )
+            for cc in child_cids:
+                large.communities[cc].parent_id = pid
+            large.summaries[f"smp{p}"] = Summary(
+                id=f"smp{p}", community_id=pid, text=f"Parent summary {p}.",
+                coverage=1.0, source_hash=f"hp{p}",
+            )
 
     # ---- shared duplicates in the small index ------------------------------
     n_shared = int(n_entities * overlap)

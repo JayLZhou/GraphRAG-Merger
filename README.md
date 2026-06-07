@@ -14,10 +14,12 @@ module by an agent** following the staged plan in
 
 > **Status: implemented (Tasks 1–4).** The full binary-merge pipeline, the
 > multi-index planner, the offline synthetic benchmark, the GraphRAG parquet
-> adapter, and the test suite are implemented and green (24 tests; the core
+> adapter, and the test suite are implemented and green (33 tests; the core
 > package has zero third-party runtime deps — the adapter's pandas/pyarrow are
-> an optional extra, imported lazily). The formal proofs in
-> [`docs/theory.md`](docs/theory.md) remain follow-up work. See [Status](#status).
+> an optional extra, imported lazily). The conflict-tolerant merge, tree-DP
+> repair planner, and certain/possible query layer (the SIGMOD direction) are in
+> too. The formal proofs in [`docs/theory.md`](docs/theory.md) remain follow-up
+> work. See [Status](#status).
 
 ## The idea in one paragraph
 
@@ -68,8 +70,10 @@ GraphRAG-Merger/
 │   ├── prune.py                # robust pruning (preserves ambiguity/conflict)
 │   ├── entity_merge.py         # conflict-aware entity fusion (union-find)
 │   ├── edge_reconcile.py       # relationship reconciliation (+ versioning, conflicts)
-│   ├── affected_region.py      # affected-community detection
-│   ├── repair_planner.py       # cheapest-repair-under-threshold planner
+│   ├── affected_region.py      # affected-community detection (multi-level)
+│   ├── partition_reconcile.py  # merge two community partitions (Stage 8)
+│   ├── repair_planner.py       # cost-optimal repair: min-cost feasible + tree-DP
+│   ├── query.py                # certain/possible answering over conflicts
 │   ├── merge.py                # binary + multi-index merge orchestration
 │   └── adapters/
 │       └── graphrag.py         # load/save Microsoft GraphRAG parquet (optional)
@@ -168,18 +172,44 @@ save_graphrag(merged, "merged/output")
 
 Requires the extra: `pip install -e ".[graphrag]"` (pandas + pyarrow).
 
+### Conflict-tolerant querying (certain / possible answers)
+
+The merge **preserves** cross-source contradictions rather than resolving them,
+and you can query the result with consistent-query-answering semantics:
+
+```python
+from semantic_merge import query
+
+# A says (Alice, Acme) status = active; B says inactive — kept, not resolved.
+ans = query.query_relationship(merged, "a1", "a2", "status")
+ans["exists"]    # {'certain': True,  'possible': True}    -> the edge holds in every repair
+ans["claim"]     # {'certain': [], 'possible': ['active','inactive']}  -> no single claim is certain
+ans["contested"] # True
+```
+
+The repair planner is a **cost-based optimizer**: it spends LLM budget only on
+the affected region, choosing the min-token-cost action per community, and on a
+hierarchical (Leiden) community tree it uses **tree-DP** to decide — optimally —
+whether to fix children individually or rebuild a whole subtree at once.
+Contested communities get **conflict-aware** summaries ("Sources disagree: …").
+
 ## Status
 
 | Component | State |
 |---|---|
 | `schema.py` (data model) | ✅ implemented |
 | Binary merge pipeline (`merge_two_indexes`) | ✅ implemented |
-| Algorithmic modules (bridge/prune/fuse/reconcile/region/repair) | ✅ implemented |
-| Unit + integration tests | ✅ 24 passing |
-| Synthetic benchmark + metrics | ✅ implemented |
+| Conflict-preserving fusion + edge reconciliation | ✅ implemented |
+| Partition reconciliation (Stage 8) | ✅ implemented |
+| Token-grounded cost model + min-cost-feasible planner | ✅ implemented |
+| Tree-DP repair planner (hierarchical) + COMPOSE | ✅ implemented |
+| Conflict-aware summaries | ✅ implemented |
+| Certain / possible query layer (`query.py`) | ✅ implemented |
 | Multi-index planner (`merge_k_indexes`) | ✅ implemented |
 | GraphRAG parquet adapter | ✅ implemented (optional extra) |
-| Theory proofs (`docs/theory.md`) | ⬜ skeleton (stated, not proved) |
+| Unit + integration tests | ✅ 33 passing |
+| NP-hardness proof + tree-DP optimality writeup (`docs/theory.md`) | ⬜ stated, not proved |
+| Large-scale + downstream-QA experiments | ⬜ pending |
 
 ## License
 

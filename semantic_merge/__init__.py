@@ -14,7 +14,9 @@ from . import (
     entity_merge,
     loader,
     merge,
+    partition_reconcile,
     prune,
+    query,
     repair_planner,
     schema,
 )
@@ -51,7 +53,9 @@ __all__ = [
     "entity_merge",
     "edge_reconcile",
     "affected_region",
+    "partition_reconcile",
     "repair_planner",
+    "query",
     "merge",
     # entrypoints
     "merge_two_indexes",

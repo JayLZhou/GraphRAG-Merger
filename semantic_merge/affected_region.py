@@ -38,39 +38,40 @@ def detect_affected_communities(
     changed_entity_ids: Set[str],
 ) -> Set[str]:
     """Return the ids of communities affected by the merge (complete superset)."""
-    ent2comm: Dict[str, str] = {}
+    # An entity belongs to its leaf community AND every ancestor in the
+    # hierarchy, so map each entity to ALL communities containing it (a plain
+    # dict would collapse multi-level membership and miss leaves or parents).
+    ent2comms: Dict[str, List[str]] = {}
     for comm in base_index.communities.values():
         for ent_id in comm.entity_ids:
-            ent2comm[ent_id] = comm.id
+            ent2comms.setdefault(ent_id, []).append(comm.id)
     base_entity_ids = set(base_index.entities)
 
     affected: Set[str] = set()
 
+    def flag(ent_id: str) -> None:
+        affected.update(ent2comms.get(ent_id, ()))
+
     # 1. fused / changed canonical entities.
     for cid in changed_entity_ids:
-        if cid in ent2comm:
-            affected.add(ent2comm[cid])
+        flag(cid)
 
     # 2-3. edge-driven: new attachments and conflicting edges.
     for rel in merged_relationships.values():
         endpoints = (rel.source, rel.target)
         if rel.attributes.get("conflicting"):
             for ep in endpoints:
-                if ep in ent2comm:
-                    affected.add(ent2comm[ep])
+                flag(ep)
         new_eps = [ep for ep in endpoints if ep not in base_entity_ids]
         if len(new_eps) == 1:  # exactly one new endpoint attaching to the base
             for ep in endpoints:
-                if ep in ent2comm:
-                    affected.add(ent2comm[ep])
+                flag(ep)
 
     # 4. entity-level conflicts referencing community members.
     for cs in conflicts:
         if cs.kind not in _ENTITY_CONFLICT_KINDS:
             continue
         for member in cs.member_ids:
-            canon = id_map.get(member, member)
-            if canon in ent2comm:
-                affected.add(ent2comm[canon])
+            flag(id_map.get(member, member))
 
     return affected

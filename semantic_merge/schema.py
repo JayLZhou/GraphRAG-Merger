@@ -47,6 +47,7 @@ class RepairAction(str, Enum):
 
     NOOP = "noop"
     PATCH_SUMMARY = "patch_summary"
+    COMPOSE_SUMMARY = "compose_summary"  # recompose from existing (child/source) summaries
     REGENERATE_SUMMARY = "regenerate_summary"
     LOCAL_RECLUSTER = "local_recluster"
     FULL_REGION_REBUILD = "full_region_rebuild"
@@ -369,6 +370,7 @@ class CostModel:
         content_tokens: float,
         summary_tokens: float,
         n_sub: int = 2,
+        child_summary_tokens: float = 0.0,
     ) -> float:
         """Estimated LLM-token cost of ``action`` for a community of this size."""
         if action is RepairAction.NOOP:
@@ -376,6 +378,12 @@ class CostModel:
         if action is RepairAction.PATCH_SUMMARY:
             # read the old summary + a small delta, emit a small edit (no raw text)
             return self.prompt_overhead + summary_tokens + self.patch_fraction * self.summary_output_tokens
+        if action is RepairAction.COMPOSE_SUMMARY:
+            # recompose from existing summaries (child summaries, or both sources'
+            # summaries) instead of re-reading raw text — the cheap option that is
+            # uniquely available when merging two already-summarized indexes.
+            inputs = child_summary_tokens if child_summary_tokens > 0 else 2.0 * summary_tokens
+            return self.prompt_overhead + inputs + self.summary_output_tokens
         if action is RepairAction.REGENERATE_SUMMARY:
             # read all member content, emit a fresh summary
             return self.prompt_overhead + content_tokens + self.summary_output_tokens
