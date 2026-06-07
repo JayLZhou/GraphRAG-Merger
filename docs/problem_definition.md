@@ -80,6 +80,51 @@ The thesis: a localized merge achieves index quality comparable to a full
 rebuild at a fraction of `B + ρ`, because `ρ` scales with the size of the
 **affected region**, not the whole index.
 
+## The merge as constrained optimization (SIGMOD formulation)
+
+Inputs `V_A = (G_A, P_A, S_A)`, `V_B = (G_B, P_B, S_B)` (graph, community partition,
+summaries); **no access to the source corpora**. Tolerances: drift bound `τ`,
+coverage bound `κ`. Compute `V_M = V_A ⊕ V_B` minimizing regeneration cost:
+
+```
+minimize    Cost(V_M) = Σ_{c ∈ C_M} cost( action(c) )
+subject to  (Soundness)     V_M is provenance-complete (no evidence lost)
+            (ConflictPres.) contradictions are represented, not resolved
+            (BoundedDrift)  ∀c ∈ C_M:  residual_drift(c, action(c)) ≤ τ
+            (Coverage)      ∀c ∈ C_M:  coverage(c, action(c)) ≥ κ
+over        action(c) ∈ {NOOP, PATCH, REGEN, RECLUSTER, REBUILD}
+            (+ the reconciled partition P_M — added in step S3)
+```
+
+## Cost model (token-grounded)
+
+Cost is measured in **LLM tokens** — the dominant build cost (entity/relationship
+*extraction* + community *summarization*). For a community with content size `T`
+(source tokens behind it) and an existing summary of `σ` tokens:
+
+```
+cost(NOOP)      = 0
+cost(PATCH)     = overhead + σ + p·out
+cost(REGEN)     = overhead + T + out
+cost(RECLUSTER) = n_sub·(overhead + out) + T
+cost(REBUILD)   = overhead + (1 + ρ)·T + out        (ρ = re-extraction ratio)
+```
+
+**Key consequence:** the actions are **not** cost-ordered — `RECLUSTER` can exceed
+`REBUILD` when `T` is small. So the planner minimizes cost over the *feasible set*,
+not "first feasible on a fixed ladder." For independent communities this
+per-community minimum is globally optimal (see `theory.md` §7); cross-community
+coupling makes it NP-hard (step S2).
+
+## Locality determines the savings
+
+Repair touches only the affected region `A ⊆ C_M`, so
+`Cost(V_M) ≈ Σ_{c ∈ A} cost(action(c))`, which is `≪ rebuild = Σ_{c ∈ C_M} cost(REBUILD,c)`
+when (i) `|A| ≪ |C_M|` and (ii) `T` per community is large (re-extraction
+dominates). Synthetic measurement (`N = 200`): merge repair is **11% / 34% / 43%**
+of full rebuild at overlap **0.15 / 0.30 / 0.50** — savings `∝ (1 − affected
+fraction)`, vanishing as overlap → 1.
+
 ## Multi-index merge
 
 Given `k` indexes `{I_1, …, I_k}`, repeatedly apply binary merge until one index

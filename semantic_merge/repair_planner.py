@@ -45,11 +45,31 @@ from .schema import (
 )
 
 
-def _community_summary_coverage(base_index: SemanticIndex, community_id: str) -> Optional[float]:
+def _community_summary(base_index: SemanticIndex, community_id: str):
     for s in base_index.summaries.values():
         if s.community_id == community_id:
-            return s.coverage
+            return s
     return None
+
+
+def _approx_tokens(text: Optional[str]) -> float:
+    """Rough token count (~4 chars/token) for cost estimation."""
+    return len(text) / 4.0 if text else 0.0
+
+
+def _content_tokens(base_index: SemanticIndex, members: Set[str]) -> float:
+    """Approximate source-text tokens behind a community (for cost estimation)."""
+    total = 0.0
+    for m in members:
+        ent = base_index.entities.get(m)
+        if ent is None:
+            continue
+        total += _approx_tokens(ent.description)
+        for tu_id in ent.text_unit_ids:
+            tu = base_index.text_units.get(tu_id)
+            if tu is not None:
+                total += float(tu.n_tokens) if tu.n_tokens else _approx_tokens(tu.text)
+    return total
 
 
 def _drift_components(
@@ -96,9 +116,9 @@ def _drift_components(
     boundary_change = min(1.0, boundary_new / n)
     conflict_density = min(1.0, conflict_count / n)
 
-    coverage = _community_summary_coverage(base_index, community_id)
-    has_summary = coverage is not None
-    old_coverage = coverage if has_summary else 1.0
+    summary = _community_summary(base_index, community_id)
+    has_summary = summary is not None
+    old_coverage = summary.coverage if has_summary else 1.0
     cov_change = min(1.0, entity_change_ratio + boundary_change)
     summary_coverage_drop = old_coverage * cov_change if has_summary else 0.0
 
@@ -119,6 +139,10 @@ def _drift_components(
         "cov_change": cov_change,
         "has_summary": 1.0 if has_summary else 0.0,
         "n": float(n),
+        # cost-model inputs (token-grounded)
+        "content_tokens": _content_tokens(base_index, member_set),
+        "summary_tokens": _approx_tokens(summary.text) if has_summary else 0.0,
+        "n_sub": float(len(comm.children_ids) or max(2, n // 8)),
     }
     return drift, info
 
@@ -139,15 +163,14 @@ def compute_drift(
     return drift
 
 
-# (residual drift, coverage-after, cost) for each action given drift + components.
-def _action_cost(action: RepairAction, n: float) -> float:
-    return {
-        RepairAction.NOOP: 0.0,
-        RepairAction.PATCH_SUMMARY: 1.0,
-        RepairAction.REGENERATE_SUMMARY: 3.0,
-        RepairAction.LOCAL_RECLUSTER: 5.0 + 2.0 * n,
-        RepairAction.FULL_REGION_REBUILD: 10.0 + 4.0 * n,
-    }[action]
+def _action_cost(action: RepairAction, info: Dict[str, float], config: MergeConfig) -> float:
+    """Token-grounded cost of an action via the configured CostModel."""
+    return config.cost_model.cost(
+        action,
+        content_tokens=info["content_tokens"],
+        summary_tokens=info["summary_tokens"],
+        n_sub=int(info["n_sub"]),
+    )
 
 
 def _residual_and_coverage(
@@ -190,20 +213,29 @@ def plan_community_repair(
     drift, info = _drift_components(
         community_id, base_index, id_map, merged_relationships, conflicts, changed_entity_ids, config
     )
+    # Among all actions that satisfy the drift/coverage constraints, pick the
+    # one with minimum token cost. The ladder is NOT cost-monotone under a real
+    # cost model (e.g. LOCAL_RECLUSTER can exceed FULL_REGION_REBUILD for small
+    # communities), so we minimize cost explicitly rather than take the first
+    # feasible action. Ties break toward the earlier (simpler) ladder action.
+    best: Optional[RepairDecision] = None
     for action in _LADDER:
         residual, coverage = _residual_and_coverage(action, drift, info, config)
         if residual <= config.drift_threshold and coverage >= config.coverage_threshold:
-            return RepairDecision(
-                community_id=community_id,
-                action=action,
-                drift=drift,
-                estimated_cost=_action_cost(action, info["n"]),
-                coverage_after=coverage,
-                rationale=f"residual={residual:.3f} <= {config.drift_threshold}, "
-                f"coverage={coverage:.3f} >= {config.coverage_threshold}",
-            )
-    # Unreachable: FULL_REGION_REBUILD always satisfies the constraints.
-    raise AssertionError("no feasible repair action (should never happen)")
+            cost = _action_cost(action, info, config)
+            if best is None or cost < best.estimated_cost:
+                best = RepairDecision(
+                    community_id=community_id,
+                    action=action,
+                    drift=drift,
+                    estimated_cost=cost,
+                    coverage_after=coverage,
+                    rationale=f"min-cost feasible: residual={residual:.3f}<=tau, "
+                    f"coverage={coverage:.3f}>=kappa, cost={cost:.0f} tok",
+                )
+    # FULL_REGION_REBUILD always satisfies the constraints, so best is never None.
+    assert best is not None, "no feasible repair action (should never happen)"
+    return best
 
 
 def plan_local_repairs(

@@ -336,6 +336,62 @@ class RepairPlan:
 
 
 # ---------------------------------------------------------------------------
+# Cost model
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CostModel:
+    """LLM-token-grounded cost of each repair action.
+
+    The dominant cost of (re)building a graph-augmented index is LLM usage:
+    entity/relationship *extraction* over source text, and community *summary*
+    generation. We express each repair action's cost in approximate LLM tokens,
+    as a function of a community's content size — so the repair planner is a
+    cost-based optimizer over a real objective rather than arbitrary constants.
+
+    A community's relevant statistics:
+      * ``content_tokens``  — total source-text tokens behind the community
+        (drives re-extraction and from-scratch summarization cost);
+      * ``summary_tokens``  — length of the existing summary (drives patch /
+        composition cost, which read summaries rather than raw text);
+      * ``n_sub``           — number of sub-communities a local recluster yields.
+    """
+
+    prompt_overhead: float = 200.0       # fixed prompt tokens per LLM call
+    summary_output_tokens: float = 400.0  # tokens emitted per generated summary
+    patch_fraction: float = 0.3          # a patch re-emits ~this much of a summary
+    extract_token_ratio: float = 1.5     # re-extraction reads text + emits triples
+
+    def cost(
+        self,
+        action: "RepairAction",
+        content_tokens: float,
+        summary_tokens: float,
+        n_sub: int = 2,
+    ) -> float:
+        """Estimated LLM-token cost of ``action`` for a community of this size."""
+        if action is RepairAction.NOOP:
+            return 0.0
+        if action is RepairAction.PATCH_SUMMARY:
+            # read the old summary + a small delta, emit a small edit (no raw text)
+            return self.prompt_overhead + summary_tokens + self.patch_fraction * self.summary_output_tokens
+        if action is RepairAction.REGENERATE_SUMMARY:
+            # read all member content, emit a fresh summary
+            return self.prompt_overhead + content_tokens + self.summary_output_tokens
+        if action is RepairAction.LOCAL_RECLUSTER:
+            # clustering itself is cheap (non-LLM); cost is regenerating n_sub summaries
+            return n_sub * (self.prompt_overhead + self.summary_output_tokens) + content_tokens
+        if action is RepairAction.FULL_REGION_REBUILD:
+            # re-extract the graph from text (the expensive part) + re-summarize
+            return (self.prompt_overhead
+                    + self.extract_token_ratio * content_tokens
+                    + content_tokens
+                    + self.summary_output_tokens)
+        return 0.0
+
+
+# ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
@@ -395,6 +451,9 @@ class MergeConfig:
     # globally unique (e.g. synthetic experiments) so id_map keys stay original.
     namespace_ids: bool = True
 
+    # Token-grounded cost model used by the repair optimizer.
+    cost_model: CostModel = field(default_factory=CostModel)
+
     # Misc knobs accessible to any stage without changing the signature.
     extra: Dict[str, object] = field(default_factory=dict)
 
@@ -418,5 +477,6 @@ __all__ = [
     "ConflictSet",
     "RepairDecision",
     "RepairPlan",
+    "CostModel",
     "MergeConfig",
 ]

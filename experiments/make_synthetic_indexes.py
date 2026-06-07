@@ -112,7 +112,7 @@ def build_synthetic_pair(
     for i in range(n_entities):
         name, etype = _unique_entity(i)
         tu_id = f"L_tu{i}"
-        large.text_units[tu_id] = TextUnit(id=tu_id, text=f"...{name}...")
+        large.text_units[tu_id] = TextUnit(id=tu_id, text=f"...{name}...", n_tokens=rng.randint(100, 400))
         ent = Entity(id=f"L{i}", name=name, type=etype, text_unit_ids=[tu_id])
         large.entities[ent.id] = ent
         large_entities.append(ent)
@@ -149,7 +149,7 @@ def build_synthetic_pair(
             sname, aliases = _alias_variation(tgt.name, tgt.type or "person"), [tgt.name]
         sid = f"S{j}"
         tu_id = f"S_tu{j}"
-        small.text_units[tu_id] = TextUnit(id=tu_id, text=f"...{sname}...")
+        small.text_units[tu_id] = TextUnit(id=tu_id, text=f"...{sname}...", n_tokens=rng.randint(100, 400))
         small.entities[sid] = Entity(id=sid, name=sname, type=tgt.type,
                                      aliases=aliases, text_unit_ids=[tu_id])
         gt.duplicate_groups[tgt.id] = [tgt.id, sid]
