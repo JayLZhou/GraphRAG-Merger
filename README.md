@@ -21,16 +21,23 @@ module by an agent** following the staged plan in
 > too. The formal proofs in [`docs/theory.md`](docs/theory.md) remain follow-up
 > work. See [Status](#status).
 
-## The idea in one paragraph
+## The idea in one paragraph (v2 framing)
 
-A merge only perturbs *part* of the graph. If we correctly identify which
-entities co-refer across indexes, reconcile edges **without losing evidence**,
-and **localize** the disturbance to a small set of affected communities, then we
-only need to repair that small region — picking the *cheapest* repair that still
-yields a correct index. Expensive operations (summary regeneration,
-reclustering) are applied surgically, not globally, so merge cost scales with
-*how much actually changed*, not with total index size. Full write-up:
-[`docs/idea.md`](docs/idea.md).
+**Compound semantic index merging** as a new data-management primitive: a
+graph-augmented-RAG index is `I = (L, H, A, Z, P)` — low-level units, a
+high-level hierarchy, materialized annotations (community reports/summaries),
+retrieval structures, provenance. To merge two independently built indexes, we
+**reuse the already-paid-for annotations as a navigable merge-time routing
+index**: hybrid routing localizes LLM-based entity-bridge construction into
+small budgeted windows; consolidation is conflict-tolerant (sound, one-sided
+error — never force-merge); affected annotations are repaired bottom-up by a
+cost-optimal tree-DP — all under **one unified merge-time token budget**
+(`tok_ER + tok_repair`). Instantiated on Microsoft GraphRAG (main), LightRAG,
+and Youtu-GraphRAG. Full write-up: [`docs/idea.md`](docs/idea.md);
+formal statement: [`docs/problem_definition.md`](docs/problem_definition.md);
+algorithm: [`docs/algorithm.md`](docs/algorithm.md);
+evaluation: [`docs/evaluation.md`](docs/evaluation.md);
+verified prior art: [`docs/related_work.md`](docs/related_work.md).
 
 ## Pipeline
 

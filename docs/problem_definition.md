@@ -1,136 +1,164 @@
-# Problem Definition
+# Problem Definition (v2): Compound Semantic Index Merging
 
-## Semantic index
+> Formal statement for the SIGMOD framing. Narrative: [`idea.md`](idea.md).
+> Algorithm: [`algorithm.md`](algorithm.md). Evaluation: [`evaluation.md`](evaluation.md).
 
-A **semantic index** is a tuple
+## 1. Compound semantic index
+
+**Definition 1 (Compound semantic index).** `I = (L, H, A, Z, P)` where
+
+- **L** — typed low-level semantic units: chunks, entities `E`, relations
+  `R ⊆ E×E`, claims;
+- **H** — high-level organization: a DAG (typically a forest) of nodes over L
+  with membership map `μ: E → 2^H`; root-to-leaf depth induces levels;
+- **A** — materialized annotations `A: H ∪ L → Σ*` (community reports, cluster
+  summaries, entity/relation descriptions); token-denominated;
+- **Z** — retrieval structures: embedding maps and ANN indexes over L and A;
+- **P** — provenance: `P: L →` source spans / document ids.
+
+Algorithmic requirements: H acyclic with coverage (every `e ∈ E` reachable from
+a root); A defined on the H-nodes used for routing. If `H = ∅` or `A = ∅`
+(HippoRAG, fast-graphrag, LinearRAG), I is an `(L,Z,P)` instance and merging
+degenerates to classical blocking+ER — in scope only as a degenerate baseline.
+
+**Verified instantiations** (sources in [`related_work.md`](related_work.md)):
+
+| Layer | MS GraphRAG | LightRAG | Youtu-GraphRAG |
+|---|---|---|---|
+| L | chunks, entities, relations, claims (parquet) | chunks, entities, relations (GraphML+JSON) | chunks, attributes, triples, keywords |
+| H | multi-level Leiden community hierarchy | depth-1 dual-level keyword space | four-level knowledge tree |
+| A | community reports per level | LLM entity/relation descriptions | LLM community summaries |
+| Z | entity/report embeddings | nano-vectordb stores | FAISS caches |
+| P | text-unit ids | source_id + file_path | chunk traceability |
+
+## 2. The merge operator
+
+**MERGE(I_s, I_t; Θ) → (I_m, B, X)** — out-of-place.
+
+- *Inputs*: two independently built indexes over distinct, partially
+  entity-overlapping corpora; no shared identifiers; **no access to raw corpora**.
+- *Parameters Θ*: unified token budget `T`; window budgets `(B_e, B_token)`;
+  per-entity bridge cap `M`; beam cap `L_max`; recall floor `ρ`; staleness bound
+  `δ`; community policy `π_H ∈ {A: attach-only, B: local-recluster, C: full-recluster}`.
+- *Outputs*: merged index `I_m`; bridge set `B` (§3); audit
+  `X = (ambiguity sets, conflict sets, merge log)`.
+
+## 3. Bridge set
+
+**Definition 2 (Labeled bridges).**
+`B ⊆ E_s × E_t × {certain, possible, cannot-link, conflict} × ℝ≥0` (evidence
+weight), each pair tagged **verified** (co-resident in an examined ER window) or
+**inferred**.
+
+- **Pruning:** ≤ M bridges per source entity; pruning must retain ≥ 1
+  representative of every label class present — ambiguity and conflict are
+  preserved explicitly, never collapsed.
+- **Consolidation:** union-find over *verified* certain edges under cannot-link
+  constraints, with fixed precedence `cannot-link ≻ certain`: violating
+  must-links are **downgraded to ambiguity, never force-merged**. Clusters
+  connected only by cross-window chains are downgraded to *possible* unless one
+  chain-endpoint pair is re-verified. Implied target–target merges (s certain to
+  both t₁ and t₂) are enqueued for explicit verification, never auto-merged via
+  a shared source.
+- **Order-independence:** windows emit evidence only; resolution is one global
+  pass; ties broken by evidence weight, then lexicographic id.
+
+## 4. Routing: budgeted top-down search over H×A
+
+State: frontier of pairs `(c_s, h)` — `c_s` any H_s node, `h` any H_t node
+(level-agnostic), initialized at `roots(H_t)`. Actions: `descend(h → child)`,
+`stop(h)` — spawning window `W(c_s, h) = (E(c_s), E(h))` with annotation
+context — or `prune`. Constraints: `|E(W)| ≤ B_e`, `tok(W) ≤ B_token`.
+
+- **Adaptive beam:**
+  `L(c_s, h) = |{h′ ∈ ch(h) : sim(emb A(c_s), emb A(h′)) ≥ α·max_child}|`,
+  capped at `L_max`.
+- **Stopping rule:** descend while some child holds ≥ τ of the ANN-hit mass of
+  `E(c_s)`; stop at the deepest node satisfying `B_e` whose window still
+  contains all top-k ANN hits of every `e ∈ E(c_s)` (**per-window recall
+  certificate**).
+- **Hybrid fallback:** candidate pairs from name-ngram + embedding-ANN blocking
+  not covered by any routed window are assigned to fallback windows — the
+  hybrid candidate set **⊇** the flat ANN set (certified floor ρ).
+
+Routing spends embedding comparisons only; LLM tokens are spent solely inside
+stopped windows.
+
+## 5. Objective: one unified merge-time token budget
 
 ```
-I = (T, E, R, C, S, P)
+tok(MERGE) = tok_ER (window calls + chain/implied-pair re-verifications)
+           + tok_repair (annotation repair)
+
+minimize tok(MERGE)  subject to:
+  I1 (no evidence loss)       every unit of L_s ∪ L_t survives, possibly merged,
+                              with audit trail
+  I2 (referential integrity)  no dangling edges; endpoints remapped
+  I3 (provenance)             P_m restricted to either input equals the original;
+                              merged units take provenance unions
+  I4 (conflict preservation)  no forced resolution; no cannot-link violated in I_m
+  I5 (bounded staleness)      every annotation whose member set changed is
+                              repaired or stale-flagged; unrepaired affected mass ≤ δ
+  Recall floor                bridge recall ≥ ρ via the hybrid certificate
 ```
 
-where
+Community partition quality (NMI vs recluster, modularity) is explicitly a
+**soft quality-cost knob** via `π_H` — reported on a Pareto curve, neither
+optimized nor an invariant. One controller allocates T across the two terms:
+routing minimizes `tok_ER`; tree-DP minimizes `tok_repair`; both priced by a
+single token cost model ([`schema.py CostModel`](../semantic_merge/schema.py)).
 
-- `T` — set of **text units** (source chunks),
-- `E` — set of **entities**, each with a name, optional type, aliases,
-  description (optionally embedded), supporting `text_unit_ids`, optional
-  temporal validity, and provenance,
-- `R` — set of **relationships** (directed edges/claims) between entities, each
-  with a relation type, description, weight, supporting `text_unit_ids`, optional
-  timestamp, and provenance,
-- `C` — set of **communities** (clusters of entities, possibly hierarchical),
-- `S` — set of **summaries**, one materialized natural-language summary per
-  community (with a coverage measure and a hash of the content it was generated
-  from),
-- `P` — **provenance** metadata threaded through `E`, `R`, `S`.
+## 6. Statements to prove
 
-The dataclasses in [`../semantic_merge/schema.py`](../semantic_merge/schema.py)
-are the executable form of this definition.
+**Theorem 1 (Consolidation soundness and confluence).** For any window-emitted
+evidence multiset, consolidation (i) violates no cannot-link; (ii) outputs
+equivalence classes refining some clustering feasible w.r.t. all verified
+evidence — hence every certain answer over I_m is a certain answer over every
+evidence-consistent merge (**one-sided error**: over-segmentation loses certain
+answers but never fabricates them); (iii) is a pure function of the evidence
+multiset, invariant to window order. *Note:* minimizing disagreements under
+must/cannot-links is correlation clustering — NP-hard (Bansal–Blum–Chawla) and
+APX-hard (Charikar–Guruswami–Wirth); we claim soundness, not approximation;
+over-segmentation is the safe direction precisely because of certain/possible
+query semantics.
 
-## The merge operation
+**Theorem 2 (Routing cost bound and hybrid dominance).** With beam cap `L_max`,
+branching `b`, target hierarchy size `N_t`: routing performs
+`O(n_s·L_max·b·log N_t)` embedding comparisons and spawns ≤ `n_s·L_max` routed
+windows, so `tok_ER ≤ n_s·L_max·B_token + tok_fallback + tok_reverify`; and the
+hybrid candidate set contains the flat ANN-blocking set, so hybrid bridge
+recall ≥ ANN-blocking recall.
 
-Given two semantic indexes `I_A` and `I_B` and a configuration `θ`, produce a
-single semantic index
+**Lemma 3 (Affected-region completeness).** Let `touched(B)` be entities
+merged, re-described, or with changed incident edges. The upward closure R of
+`μ(touched(B))` in H_m contains every node whose member or incident-edge
+multiset differs from I_t; for `h ∉ R`, `A_t(h)` remains exact, so NOOP outside
+R incurs zero staleness.
 
-```
-I_M = merge(I_A, I_B; θ)
-```
+**Lemma 4 (Repair-plan optimality).** Under an additive token cost model on
+tree-structured H_m, tree-DP over per-node actions {NOOP, PATCH, COMPOSE,
+REGENERATE, LOCAL_RECLUSTER, FULL_REBUILD} returns a minimum-token plan among
+all plans satisfying I5 with bound δ and parent–child action compatibility
+(e.g., COMPOSE requires fresh child summaries).
 
-that is **consistent** (communities/summaries agree with the merged graph) and
-**faithful** (no evidence is lost).
+---
 
-## Correctness invariants
+## Appendix: v1 cost-model results (carried forward)
 
-A correct merge must satisfy:
-
-1. **No silent evidence loss.** Every `text_unit_id` and provenance record
-   present in `I_A` or `I_B` is reachable in `I_M` (possibly under a remapped,
-   fused entity/edge). Nothing is dropped without being recorded.
-
-2. **Conflict preservation.** If `I_A` and `I_B` carry contradictory claims
-   about the same (canonical) entity pair and relation type, `I_M` retains both,
-   linked by a **conflict set** — it must not pick one and silently discard the
-   other.
-
-3. **Referential integrity.** Every relationship endpoint in `I_M` refers to an
-   entity that exists in `I_M`; every summary refers to a community that exists.
-
-4. **Temporal monotonicity.** When two records describe the same fact at
-   different times, `I_M` represents them as an ordered version chain; it does
-   not collapse them into a single timeless claim.
-
-## Quality objective (entities)
-
-Let `≡` denote true co-reference (ground truth: two entity records denote the
-same real-world entity). A good merge maximizes fusion **precision** and
-**recall** w.r.t. `≡`:
-
-- fuse `e_a, e_b` when `e_a ≡ e_b` (recall: avoid duplicates),
-- keep `e_a, e_b` separate when `e_a ≢ e_b` even if names collide (precision:
-  avoid bad merges — the "same name, different entity" case).
-
-## Cost objective
-
-Let `B` be the number of entity-pair comparisons performed during bridge
-discovery, and let `ρ` be the repair cost (summed cost of the chosen repair
-actions, dominated by simulated summary regenerations). The objective is to
-minimize a weighted combination of `B` and `ρ` (and wall-clock time) **subject
-to** the correctness invariants and a target index-quality level.
-
-The thesis: a localized merge achieves index quality comparable to a full
-rebuild at a fraction of `B + ρ`, because `ρ` scales with the size of the
-**affected region**, not the whole index.
-
-## The merge as constrained optimization (SIGMOD formulation)
-
-Inputs `V_A = (G_A, P_A, S_A)`, `V_B = (G_B, P_B, S_B)` (graph, community partition,
-summaries); **no access to the source corpora**. Tolerances: drift bound `τ`,
-coverage bound `κ`. Compute `V_M = V_A ⊕ V_B` minimizing regeneration cost:
-
-```
-minimize    Cost(V_M) = Σ_{c ∈ C_M} cost( action(c) )
-subject to  (Soundness)     V_M is provenance-complete (no evidence lost)
-            (ConflictPres.) contradictions are represented, not resolved
-            (BoundedDrift)  ∀c ∈ C_M:  residual_drift(c, action(c)) ≤ τ
-            (Coverage)      ∀c ∈ C_M:  coverage(c, action(c)) ≥ κ
-over        action(c) ∈ {NOOP, PATCH, REGEN, RECLUSTER, REBUILD}
-            (+ the reconciled partition P_M — added in step S3)
-```
-
-## Cost model (token-grounded)
-
-Cost is measured in **LLM tokens** — the dominant build cost (entity/relationship
-*extraction* + community *summarization*). For a community with content size `T`
-(source tokens behind it) and an existing summary of `σ` tokens:
+The token cost model and locality measurements from the v1 formulation remain
+the basis of `tok_repair`:
 
 ```
 cost(NOOP)      = 0
 cost(PATCH)     = overhead + σ + p·out
-cost(REGEN)     = overhead + T + out
-cost(RECLUSTER) = n_sub·(overhead + out) + T
-cost(REBUILD)   = overhead + (1 + ρ)·T + out        (ρ = re-extraction ratio)
+cost(COMPOSE)   = overhead + Σ child-summary tokens + out     (reuse, no raw text)
+cost(REGEN)     = overhead + T_content + out
+cost(RECLUSTER) = n_sub·(overhead + out) + T_content
+cost(REBUILD)   = overhead + (1 + ρ_extract)·T_content + out
 ```
 
-**Key consequence:** the actions are **not** cost-ordered — `RECLUSTER` can exceed
-`REBUILD` when `T` is small. So the planner minimizes cost over the *feasible set*,
-not "first feasible on a fixed ladder." For independent communities this
-per-community minimum is globally optimal (see `theory.md` §7); cross-community
-coupling makes it NP-hard (step S2).
-
-## Locality determines the savings
-
-Repair touches only the affected region `A ⊆ C_M`, so
-`Cost(V_M) ≈ Σ_{c ∈ A} cost(action(c))`, which is `≪ rebuild = Σ_{c ∈ C_M} cost(REBUILD,c)`
-when (i) `|A| ≪ |C_M|` and (ii) `T` per community is large (re-extraction
-dominates). Synthetic measurement (`N = 200`): merge repair is **11% / 34% / 43%**
-of full rebuild at overlap **0.15 / 0.30 / 0.50** — savings `∝ (1 − affected
-fraction)`, vanishing as overlap → 1.
-
-## Multi-index merge
-
-Given `k` indexes `{I_1, …, I_k}`, repeatedly apply binary merge until one index
-remains. The **order** matters for total cost (different pairings disturb
-different amounts of structure). The planning problem: choose a sequence of
-binary merges minimizing estimated total cost, where each candidate pair `(I_i,
-I_j)` has an estimated cost `Ĉ(I_i, I_j)` and benefit (overlap / duplicate
-reduction). See [`theory.md`](theory.md) §9 and [`codex_tasks.md`](codex_tasks.md)
-task 3.
+Actions are **not** cost-ordered (RECLUSTER can exceed REBUILD for small
+communities), so planners minimize cost over the feasible set. Synthetic
+measurement (N = 200): merge repair = **11% / 34% / 43%** of full rebuild at
+overlap 0.15 / 0.30 / 0.50; tree-DP ≈ **49%** of per-community greedy on
+hierarchical data.

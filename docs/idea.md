@@ -1,107 +1,141 @@
-# Idea: Efficient Semantic Index Merging for Graph-Augmented RAG
+# Idea v2: Compound Semantic Index Merging for Graph-Augmented RAG
+
+> Supersedes the v1 framing (conflict-tolerant merge as headline, tree-DP as star).
+> v1 survives intact as the **execution layer** of v2 — see "Where v1 lives now."
 
 ## One-line
 
-Merging two graph-augmented RAG indexes should be a **first-class, correctness-preserving, sub-rebuild-cost operation** — not a naive union and not a full re-build.
+**Semantic index merging is a new data-management primitive**: merging two
+independently built graph-augmented-RAG indexes by **reusing their already-paid-for
+high-level annotations (community reports / summaries) as a navigable merge-time
+routing index** that localizes LLM-based bridge construction into small budgeted
+windows — under **one unified merge-time token budget** covering bridge
+construction *and* annotation repair.
 
-## Motivation
+## The abstraction
 
-Graph-augmented RAG systems (e.g. Microsoft GraphRAG) don't retrieve over raw
-chunks alone. They build a **semantic index**: entities and relationships are
-extracted from text, clustered into communities, and each community gets a
-materialized natural-language **summary**. Query-time retrieval and global
-"sense-making" run over this structured artifact.
+A **compound semantic index** is `I = (L, H, A, Z, P)`:
 
-Building a semantic index is expensive — it is dominated by LLM calls for
-entity/relationship extraction and for community summarization. So once you have
-indexes, you very often need to **combine** them:
+| Layer | Meaning | MS GraphRAG | LightRAG | Youtu-GraphRAG |
+|---|---|---|---|---|
+| **L** | low-level semantic units | chunks, entities, relations, claims | chunks, entities, relations | chunks, attributes, triples, keywords |
+| **H** | high-level organization (DAG) | multi-level Leiden hierarchy | depth-1 dual keyword space | four-level knowledge tree |
+| **A** | materialized annotations | community reports | entity/relation descriptions | community summaries |
+| **Z** | retrieval structures | embeddings (LanceDB) | nano-vectordb stores | FAISS caches |
+| **P** | provenance | text-unit ids | source_id + file_path | chunk traceability |
 
-- **Incremental ingestion** — a new batch of documents arrives; you've already
-  indexed it separately and want to fold it into the main index.
-- **Federation** — different teams/sources each maintain an index; you want a
-  unified view.
-- **Sharded builds** — a large corpus was indexed in parallel shards that must
-  be reconciled.
+Honesty clause that *sharpens* the formulation: systems with `H=∅, A=∅`
+(HippoRAG, fast-graphrag, LinearRAG) are `(L,Z,P)` instances — for them merging
+*provably degenerates* to classical blocking+ER. H/A-guided merging applies
+exactly when the system materializes high-level semantics.
 
-Today there are two bad options:
+## The analogy that anchors the primitive
 
-1. **Naive union.** Concatenate everything. This *duplicates* entities ("John
-   Smith" appears twice), produces dangling/duplicated edges, and — worst —
-   **silently drops or overwrites conflicting evidence**. Community structure
-   and summaries become inconsistent with the merged graph.
-2. **Full rebuild.** Re-extract and re-summarize from the union of all text.
-   Correct, but pays the full (LLM-dominated) build cost *again*, discarding all
-   prior work. It scales terribly when merges are frequent or indexes are large.
+**HNSW-Merger (SIGMOD 2026)** merges *proximity structures* (our Z layer) via
+forward-search + lazy backward connect. We merge the **whole compound index** —
+L, H, A, Z, P jointly and consistently — and our cost unit is **LLM tokens**,
+not distance computations. The inversion at the core: *summaries built for
+query-time retrieval are repurposed as a merge-time search structure.*
 
-## The core insight
+## Why merge (and not the alternatives)
 
-A merge perturbs only **part** of the graph. If we can (a) correctly identify
-*which* entities co-refer across indexes, (b) reconcile edges **without losing
-evidence**, and (c) **localize** the disturbance to a small set of affected
-communities, then we only need to repair that small region — and we can pick the
-*cheapest* repair that still yields a correct index. The expensive operations
-(LLM summary regeneration, reclustering) are applied surgically, not globally.
+- **Full rebuild** pays the entire LLM extraction+summarization bill again and
+  needs the raw corpora.
+- **`graphrag update` / LightRAG insert** are single-index *appends* of raw
+  text: exact-title merges, union communities, no conflict handling — and they
+  too need raw documents.
+- **Query-time federation (SCOUT-RAG)** never materializes a merged artifact and
+  pays routing cost *per query*; we pay once at merge time and amortize.
+- **Privacy/federation**: two organizations can exchange indexes when they
+  cannot exchange corpora — index-level merge is then the *only* option.
 
-This turns "merge" into an operation whose cost scales with **how much actually
-changed**, not with total index size.
+## Pipeline (one breath)
 
-## Approach (the pipeline)
+Normalize via adapter contract → **hybrid routing** (annotation-guided top-down
+descent + cheap blocking safety net, so hybrid candidates ⊇ flat-ANN candidates
+by construction) → budgeted **ER windows** (B_e entities / B_token tokens, with
+a per-window recall certificate) → in-window **LLM set-clustering** emitting
+*evidence only* — labeled pairs {certain, possible, cannot-link, conflict} —
+→ robust **pruning** (top-M per entity, never dropping the last witness of an
+ambiguity/conflict) → **global consolidation** (union-find under cannot-link
+constraints; violations downgrade to ambiguity, never force-merge; cross-window
+chains and implied target–target merges get explicit verification) →
+out-of-place **conflict-tolerant graph merge** → affected-region detection →
+community maintenance as an explicit **quality-cost knob** (attach-only / local
+recluster / full recluster) → bottom-up **tree-DP annotation repair** under the
+residual budget.
 
-Given two indexes `A` and `B`:
+## The unified budget (resolves the v1↔v2 tension)
 
-1. **Orient** — search forward from the *smaller* index into the larger one.
-   This is the key to the `O(N_small · log N_large)` cost bound (with blocking).
-2. **Semantic bridge discovery** — for each small-index entity, find candidate
-   correspondences in the large index using *multiple* signals (name, alias,
-   type, description-embedding, neighbor overlap, temporal compatibility) so no
-   single noisy signal dominates.
-3. **Robust pruning** — bound candidates per entity, drop hard-incompatible
-   ones, and **explicitly preserve ambiguity and conflict** rather than guessing.
-4. **Lazy reverse consolidation** — large-index entities with no forward match
-   are carried over; their reverse candidacy is recorded for on-demand
-   resolution instead of a second full search.
-5. **Conflict-aware entity fusion** — high-confidence bridges fuse; low-confidence
-   stay separate; ambiguous pairs become preserved ambiguity records. Fusion is
-   loss-less on evidence (aliases, text units, provenance, time).
-6. **Edge reconciliation** — remap endpoints to canonical ids, merge compatible
-   edges, **version** temporal updates, and **preserve contradictions** as
-   conflict sets. Never silently overwrite evidence.
-7. **Affected-region detection** — compute the (complete) set of communities the
-   merge disturbed.
-8. **Local repair planning** — for each affected community, choose the cheapest
-   action (`NOOP < PATCH_SUMMARY < REGENERATE_SUMMARY < LOCAL_RECLUSTER <
-   FULL_REGION_REBUILD`) that brings a drift score under threshold while keeping
-   summary coverage acceptable.
-9. **Assemble** the merged index and apply the repair plan.
+v1's selling point was "structural merge is LLM-free." v2 spends LLM tokens at
+merge time (ER windows). Resolution — and the paper's strongest unifying claim:
 
-For **multiple** indexes, a **semantic-aware planner** chooses the merge *order*:
-each binary merge has an estimated cost and an estimated benefit (overlap /
-duplicate reduction), and we greedily merge the pair minimizing `cost / (1 +
-benefit)`.
+```
+minimize  tok(MERGE) = tok_ER + tok_verify + tok_repair
+subject to hard invariants I1–I5 (evidence, integrity, provenance,
+           conflict preservation, bounded staleness) + recall floor ρ
+```
 
-## What makes it a research contribution
+One controller allocates the budget; **routing minimizes tok_ER**, **tree-DP
+minimizes tok_repair**, both priced by the same token cost model. Community
+partition quality is explicitly a *soft* knob reported on a Pareto curve.
 
-- **Correctness invariants** for index merging: *no silent evidence loss* and
-  *conflict preservation*. These are stated precisely and tested.
-- An **equivalence-to-rebuild oracle**: define when the localized merge yields an
-  index equivalent to a full rebuild, and characterize the gap when it doesn't.
-- A **cost model** showing binary merge is sub-quadratic via blocking + smaller-side
-  forward search, and a **local repair optimality** result for independent
-  communities (with a tree-DP extension for hierarchical communities).
-- A **multi-index merge-order** cost model with empirical validation.
+## Where v1 lives now (nothing wasted)
 
-The formal statements live in [`theory.md`](theory.md); the experimental plan
-(synthetic benchmarks + metrics + baselines) lives in [`experiments.md`](experiments.md);
-the precise problem statement is in [`problem_definition.md`](problem_definition.md).
+- **Conflict preservation + certain/possible querying** = the
+  *guarantee-preserving execution layer*: over-segmentation is the **safe
+  one-sided error** — a missed merge loses certain answers but never fabricates
+  them; a wrong merge corrupts them. This is why "downgrade to ambiguity, never
+  force-merge" is principled, not timid (consolidation soundness, Theorem 1).
+- **Tree-DP repair** = maintenance under residual budget (Lemma 4 optimality;
+  measured ~49% of greedy cost on hierarchical synthetic data).
+- **Token cost model, affected-region completeness, GraphRAG adapter, synthetic
+  benchmark** — all carried forward.
 
-## Scope discipline (what the first version deliberately does NOT do)
+## Contributions (three, clean)
 
-To keep the prototype focused and self-contained:
+1. **Problem formulation.** Compound semantic index merging `MERGE(I_s, I_t; Θ)`
+   with the unified token-budget objective and hard invariants — validated on
+   three systems via a published adapter contract.
+2. **Hierarchy-guided bridge search.** Budgeted, level-agnostic, *hybrid*
+   routing over H×A with adaptive beam, a principled stopping rule (per-window
+   recall certificate), a certified recall floor, and a cost bound
+   (tok_ER ≤ n_s·L·B_token + fallback + reverify).
+3. **Robust conflict-tolerant consolidation.** Evidence-only windows → global,
+   order-invariant (confluent) consolidation under cannot-link constraints with
+   soundness (one-sided error) — correlation-clustering hardness acknowledged,
+   soundness claimed instead of approximation.
 
-- **No real GraphRAG parquet ingestion** in v1 (added later as an adapter).
-- **No real LLM calls** — summary "regeneration" is modeled by cost/coverage
-  proxies so the algorithm and benchmarks are deterministic and offline.
-- **No large-scale real-world experiments** until the synthetic benchmark
-  validates the algorithm and invariants.
+Leiden quality and summary repair are **not** contributions: maintenance
+policies and evaluation axes.
 
-The build order is staged in [`codex_tasks.md`](codex_tasks.md).
+## What the reviewers will say, and the prepared answers
+
+| Attack | Answer |
+|---|---|
+| "Routing is the obvious thing to do with summaries" | It's formalized as constrained tree search with budgets, stopping rule, recall certificate, and cost bound — plus measured **routing regret** vs an oracle router. Mechanism is proven by the routing-recall *curve*, not asserted. |
+| "ANN blocking is also sublinear — candidate counts prove nothing" | Correct; the comparison axis is **tokens / LLM-calls per recovered bridge at matched recall**. Routing's real win: it bounds LLM context per decision and reuses already-paid-for A (zero extra index build). |
+| "In-window clustering = LLM-CER applied locally" | LLM-CER is our *subroutine*, cited as such. The contribution is what LLM-CER never faces: consolidating **conflicting partial clusterings across overlapping windows** under cannot-link constraints, with soundness + confluence. |
+| "(L,H,A,Z,P) is cosmetic" | It's load-bearing: operators are typed against it; LightRAG's depth-1 H *predicts* a measurable cost delta (graceful degradation) — the formalism makes a falsifiable cross-system prediction. |
+| "1 real system + 2 shallow adapters" | Adapter contract + LOC published; every contribution validated on ≥2 systems; skipped cells justified structurally, never by convenience. |
+| "Why not federate at query time?" | SCOUT-RAG comparison: per-query routing cost vs one-time merge, amortization break-even analysis. |
+
+## Verified novelty gap (June 2026)
+
+No existing work merges two independently built GraphRAG-style indexes.
+HNSW-Merger merges Z only; PARIS/LLM-ER merge L only; consensus clustering
+merges H over a *shared* universe; GraphRAG/LightRAG updates append raw text to
+one index; SCOUT-RAG federates without producing an artifact. Details and
+citations: [`related_work.md`](related_work.md).
+
+## Paper-name candidates
+
+**BriGeRAG** (Bridge-guided GraphRAG index merging) / **SIM** (Semantic Index
+Merging) / keep repo name GraphRAG-Merger for the artifact.
+
+## Companion docs
+
+- [`problem_definition.md`](problem_definition.md) — formal statement + theorems
+- [`algorithm.md`](algorithm.md) — refined 9-step spec + pseudocode + module map
+- [`evaluation.md`](evaluation.md) — datasets, baselines, metrics, budget, headline figures
+- [`related_work.md`](related_work.md) — verified prior art + positioning
